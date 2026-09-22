@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>DeepSeek 余额助手</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- 1. 顶部标题栏 -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20">
+            <rect x="3" y="10" width="4" height="9" rx="1.2" fill="#fff"/>
+            <rect x="10" y="6" width="4" height="13" rx="1.2" fill="#fff"/>
+            <rect x="17" y="2.5" width="4" height="16.5" rx="1.2" fill="#fff"/>
+          </svg>
+        </span>
+        <h1 class="brand-name">DeepSeek 余额助手</h1>
+      </div>
+      <div class="top-actions">
+        <button id="settingsBtn" class="icon-btn" type="button" title="设置" aria-label="设置"
+                aria-expanded="false" aria-controls="settingsPage">
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94 0 .31.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+          </svg>
+        </button>
+        <button id="refreshBtn" class="icon-btn" type="button" title="立即刷新" aria-label="立即刷新">
+          <svg id="refreshIcon" viewBox="0 0 24 24" width="18" height="18">
+            <path fill="currentColor" d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 页面轨道：主页面 / 设置页 左右滑动切换 -->
+    <div class="pages" id="pages">
+
+      <!-- 主页面：余额 + Token 用量 -->
+      <main class="page main-page" id="mainPage">
+        <!-- 2. 余额主卡片 -->
+        <section class="balance-card" id="balanceCard">
+          <div class="balance-label">可用余额（元）</div>
+          <div class="balance-value">
+            <span class="currency">¥</span><span id="balanceValue">--.--</span>
+          </div>
+          <div class="balance-sub">
+            已消耗 <strong id="consumedValue">¥0.00</strong>
+            <span class="tip" title="DeepSeek 官方接口不返回历史已用金额，该数值为本扩展在本地根据余额下降差值累计的估算（卸载扩展会清零）">本地统计</span>
+          </div>
+          <div class="balance-grid">
+            <div class="mini-stat">
+              <div class="mini-label">充值余额</div>
+              <div class="mini-value" id="toppedUpValue">--</div>
+            </div>
+            <div class="mini-stat">
+              <div class="mini-label">赠送余额</div>
+              <div class="mini-value" id="grantedValue">--</div>
+            </div>
+            <div class="mini-stat" id="totalQuotaWrap" hidden>
+              <div class="mini-label">总额度</div>
+              <div class="mini-value" id="totalQuotaValue">--</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2.5 Token 用量卡片 -->
+        <section class="settings-card usage-card">
+          <div class="usage-head">
+            <div class="settings-title" style="margin-bottom:0;">Token 用量</div>
+            <div class="seg" role="tablist">
+              <button id="scopeTodayBtn" class="seg-btn active" type="button">今日</button>
+              <button id="scopeTotalBtn" class="seg-btn" type="button">累计</button>
+            </div>
+          </div>
+
+          <div class="hit-grid">
+            <div class="hit-box miss">
+              <div class="hit-label">缓存未命中</div>
+              <div class="hit-value" id="missTokens">0</div>
+            </div>
+            <div class="hit-box hit">
+              <div class="hit-label">缓存命中</div>
+              <div class="hit-value" id="hitTokens">0</div>
+            </div>
+          </div>
+          <div class="hit-bar" title="缓存命中占输入 token 的比例">
+            <span id="hitBarFill" class="hit-bar-fill"></span>
+          </div>
+          <div class="hit-rate" id="hitRate">缓存命中率 --</div>
+
+          <div class="usage-grid">
+            <div class="mini-stat-light">
+              <div class="mini-label">输入</div>
+              <div class="mini-value" id="promptTokens">0</div>
+            </div>
+            <div class="mini-stat-light">
+              <div class="mini-label">输出</div>
+              <div class="mini-value" id="completionTokens">0</div>
+            </div>
+            <div class="mini-stat-light">
+              <div class="mini-label">总 Tokens</div>
+              <div class="mini-value" id="totalTokens">0</div>
+            </div>
+            <div class="mini-stat-light">
+              <div class="mini-label">请求次数</div>
+              <div class="mini-value" id="requestCount">0</div>
+            </div>
+          </div>
+
+          <div class="model-list" id="modelList"></div>
+
+          <div class="usage-foot">
+            <span class="foot-note" title="扩展通过在网页内拦截 DeepSeek 接口响应来统计 token；在你自己服务器/后端发起的调用，浏览器扩展无法捕获。流式(SSE)响应需请求时带 stream_options.include_usage=true 才会返回 usage。">
+              仅统计浏览器页面内发起的 DeepSeek 调用（含官方平台页）
+            </span>
+            <button id="resetUsageBtn" class="link-btn" type="button">清空统计</button>
+          </div>
+        </section>
+      </main>
+
+      <!-- 设置页（从右侧滑入） -->
+      <section class="page settings-page" id="settingsPage" aria-hidden="true">
+        <div class="settings-card">
+          <div class="settings-header">
+            <button id="settingsBackBtn" class="icon-btn small" type="button" title="返回" aria-label="返回主页面">
+              <svg viewBox="0 0 24 24" width="18" height="18">
+                <path fill="currentColor" d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/>
+              </svg>
+            </button>
+            <div class="settings-title" style="margin-bottom:0;">设置</div>
+          </div>
+
+          <!-- API Key -->
+          <label class="field-label" for="apiKeyInput">API Key</label>
+          <div class="key-row">
+            <input
+              type="password"
+              id="apiKeyInput"
+              class="text-input"
+              placeholder="sk-..."
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button id="toggleKeyBtn" class="icon-btn small" type="button" title="显示/隐藏密钥" aria-label="显示或隐藏密钥">
+              <svg id="eyeIcon" viewBox="0 0 24 24" width="16" height="16">
+                <path fill="currentColor" d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/>
+              </svg>
+            </button>
+          </div>
+          <div class="field-hint" id="keyHint">密钥仅保存在本机 chrome.storage.local，不会上传到任何第三方服务器</div>
+
+          <!-- 预警阈值 + 开关 -->
+          <div class="setting-row">
+            <div class="setting-text">
+              <div class="setting-name">余额不足提醒</div>
+              <div class="setting-desc">可用余额低于阈值时弹出系统通知</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="alertToggle" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <label class="field-label" for="thresholdInput">预警阈值（元）</label>
+          <input
+            type="number"
+            id="thresholdInput"
+            class="text-input"
+            min="0"
+            step="0.5"
+            placeholder="5"
+          />
+
+          <!-- 自动刷新间隔 -->
+          <label class="field-label" for="intervalSelect">后台自动刷新间隔</label>
+          <select id="intervalSelect" class="text-input">
+            <option value="5">每 5 分钟</option>
+            <option value="10" selected>每 10 分钟</option>
+            <option value="30">每 30 分钟</option>
+            <option value="60">每 1 小时</option>
+          </select>
+
+          <!-- 页面浮窗显示模式 -->
+          <label class="field-label" for="widgetModeSelect">页面浮窗显示模式</label>
+          <select id="widgetModeSelect" class="text-input">
+            <option value="floating" selected>悬浮窗（可自由拖拽）</option>
+            <option value="pinned">常驻页面右上角</option>
+            <option value="off">不显示浮窗</option>
+          </select>
+          <div class="field-hint">浮窗默认显示在所有网页中，实时展示余额与今日 token 用量；悬浮模式下可在任意页面拖拽</div>
+
+          <label class="field-label">用量监控站点（可选）</label>
+          <div class="site-row">
+            <input type="text" id="siteInput" class="text-input" placeholder="https://chat.example.com" spellcheck="false" />
+            <button id="addSiteBtn" class="add-btn" type="button">添加</button>
+          </div>
+          <div id="siteList" class="site-list"></div>
+          <div class="field-hint" id="siteHint">默认已监控 DeepSeek 官方平台页；若你在其他网页客户端中调用 API，添加其网址（授权后刷新该页）即可统计 token 用量</div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- 4. 底部状态栏 -->
+    <footer class="statusbar">
+      <span id="statusDot" class="status-dot"></span>
+      <span id="statusText" class="status-text">尚未查询</span>
+    </footer>
+
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

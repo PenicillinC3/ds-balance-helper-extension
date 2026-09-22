@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "DeepSeek 余额助手",
+  "version": "1.2.3",
+  "description": "实时监控 DeepSeek API 账户余额与 token 用量（缓存命中/未命中），支持低余额系统通知、后台定时自动刷新，数据仅保存在本地浏览器。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "DeepSeek 余额助手",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://platform.deepseek.com/*"],
+      "js": ["interceptor-main.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://platform.deepseek.com/*"],
+      "js": ["interceptor-bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["widget.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "permissions": [
+    "storage",
+    "notifications",
+    "alarms",
+    "scripting"
+  ],
+  "optional_host_permissions": [
+    "*://*/*"
+  ],
+  "host_permissions": [
+    "https://api.deepseek.com/*"
+  ]
+}
