@@ -2,6 +2,8 @@
 
 实时监控 DeepSeek API 账户余额与 token 用量的轻量扩展，Manifest V3，纯原生 HTML + CSS + JavaScript，无任何第三方依赖。
 
+~~**贫穷的作者因为前端创作而不想单开一个网页页面去看剩多少钱而做出来的产物QAQ**~~
+
 ## 功能
 
 - **余额展示**：调用官方接口 `GET https://api.deepseek.com/user/balance`，大号字体显示可用余额，并展示充值余额、赠送余额、本地累计消耗、上次更新时间。
