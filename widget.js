@@ -120,10 +120,11 @@
 
     .ds-logo {
       width: 18px; height: 18px; border-radius: 5px;
-      background: rgba(255,255,255,.18);
+      background: #fff; overflow: hidden;
       display: inline-flex; align-items: center; justify-content: center;
       flex-shrink: 0;
     }
+    .ds-logo-img { width: 100%; height: 100%; display: block; }
     .ds-title { font-size: 12px; font-weight: 700; }
     .ds-spacer { flex: 1; }
 
@@ -194,11 +195,7 @@
     <div class="ds-card">
       <div class="ds-header" id="ds-header">
         <span class="ds-logo">
-          <svg viewBox="0 0 24 24" width="12" height="12">
-            <rect x="3" y="10" width="4" height="9" rx="1.2" fill="#fff"/>
-            <rect x="10" y="6" width="4" height="13" rx="1.2" fill="#fff"/>
-            <rect x="17" y="2.5" width="4" height="16.5" rx="1.2" fill="#fff"/>
-          </svg>
+          <img class="ds-logo-img" alt="DeepSeek 图标">
         </span>
         <span class="ds-title">DeepSeek 余额</span>
         <span class="ds-spacer"></span>
@@ -446,6 +443,11 @@
     };
     // 供拖拽等内部查询复用
     $ = (sel) => shadow.querySelector(sel);
+
+    // 内容脚本中需用扩展绝对 URL 引用图标资源
+    if (chrome.runtime && typeof chrome.runtime.getURL === 'function') {
+      $('.ds-logo-img').src = chrome.runtime.getURL('icons/icon128.png');
+    }
 
     ui.refresh.addEventListener('click', manualRefresh);
     ui.close.addEventListener('click', closeWidget);
