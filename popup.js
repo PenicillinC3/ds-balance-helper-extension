@@ -28,6 +28,8 @@ const el = {
   alertToggle: document.getElementById('alertToggle'),
   intervalSelect: document.getElementById('intervalSelect'),
   widgetModeSelect: document.getElementById('widgetModeSelect'),
+  widgetModeNotice: document.getElementById('widgetModeNotice'),
+  widgetModeNoticeClose: document.getElementById('widgetModeNoticeClose'),
   settingsBtn: document.getElementById('settingsBtn'),
   settingsBackBtn: document.getElementById('settingsBackBtn'),
   pages: document.getElementById('pages'),
@@ -175,7 +177,12 @@ function bindEvents() {
   el.thresholdInput.addEventListener('change', saveSettingsFromForm);
   el.alertToggle.addEventListener('change', saveSettingsFromForm);
   el.intervalSelect.addEventListener('change', saveSettingsFromForm);
-  el.widgetModeSelect.addEventListener('change', saveSettingsFromForm);
+  // 浮窗显示模式更改：保存后展开“请刷新页面”提醒
+  el.widgetModeSelect.addEventListener('change', async () => {
+    await saveSettingsFromForm();
+    showWidgetModeNotice();
+  });
+  el.widgetModeNoticeClose.addEventListener('click', hideWidgetModeNotice);
 
   // 齿轮：切换设置页滑入 / 滑出
   el.settingsBtn.addEventListener('click', () => {
@@ -345,6 +352,18 @@ function setSiteHint(text, isError) {
 
 function saveApiKey(key) {
   return chrome.storage.local.set({ ds_api_key: key });
+}
+
+/** 展开“浮窗模式已更改，请刷新页面”提醒条（带展开过渡） */
+function showWidgetModeNotice() {
+  el.widgetModeNotice.classList.add('show');
+  // 设置页高度可能因提醒条展开而变化，下一帧重新贴合容器高度
+  requestAnimationFrame(() => layoutPages());
+}
+
+function hideWidgetModeNotice() {
+  el.widgetModeNotice.classList.remove('show');
+  requestAnimationFrame(() => layoutPages());
 }
 
 async function saveSettingsFromForm() {

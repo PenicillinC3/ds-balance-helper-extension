@@ -423,6 +423,62 @@ select.text-input {
   cursor: pointer;
 }
 
+/* ---------------- 浮窗模式更改后的刷新提醒 ---------------- */
+
+.refresh-notice {
+  margin-top: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--brand-light);
+  color: var(--brand-dark);
+  border: 1px solid transparent;
+  /* 收起态：高度折叠、透明，不占空间 */
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.25s ease, padding 0.3s ease, margin-top 0.3s ease,
+    border-color 0.3s ease;
+}
+
+.refresh-notice.show {
+  max-height: 90px;
+  opacity: 1;
+  margin-top: 7px;
+  padding: 7px 8px;
+  border-color: rgba(77, 107, 254, 0.25);
+}
+
+.refresh-notice-icon {
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+.refresh-notice-text {
+  flex: 1;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.refresh-notice-close {
+  border: none;
+  background: transparent;
+  color: var(--brand-dark);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.refresh-notice-close:hover {
+  opacity: 1;
+}
+
 /* ---------------- 底部状态栏 ---------------- */
 
 .statusbar {

@@ -186,6 +186,15 @@
             <option value="pinned">常驻页面右上角</option>
             <option value="off">不显示浮窗</option>
           </select>
+          <!-- 浮窗模式更改后的刷新提醒（默认收起） -->
+          <div class="refresh-notice" id="widgetModeNotice" role="status" aria-live="polite">
+            <svg class="refresh-notice-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+              <path fill="currentColor" d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/>
+            </svg>
+            <span class="refresh-notice-text">浮窗显示模式已更改，请刷新网页后生效（Ctrl+R / F5）</span>
+            <button class="refresh-notice-close" id="widgetModeNoticeClose" type="button"
+                    title="关闭提示" aria-label="关闭刷新提示">&times;</button>
+          </div>
           <div class="field-hint">浮窗默认显示在所有网页中，实时展示余额与今日 token 用量；悬浮模式下可在任意页面拖拽</div>
 
           <label class="field-label">用量监控站点（可选）</label>
