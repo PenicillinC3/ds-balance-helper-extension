@@ -34,8 +34,18 @@
     <!-- 页面轨道：主页面 / 设置页 左右滑动切换 -->
     <div class="pages" id="pages">
 
-      <!-- 主页面：余额 + Token 用量 -->
+      <!-- 主页面：余额 + 全平台用量金额 -->
       <main class="page main-page" id="mainPage">
+        <!-- 前后台版本不一致 / 后台无响应时的提示（默认收起） -->
+        <div class="stale-notice" id="staleNotice" role="alert" hidden>
+          <svg class="stale-notice-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path fill="currentColor" d="M12 2 1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2V9h2v4z"/>
+          </svg>
+          <span class="stale-notice-text" id="staleNoticeText"></span>
+          <button class="refresh-notice-close" id="staleNoticeClose" type="button"
+                  title="关闭提示" aria-label="关闭提示">&times;</button>
+        </div>
+
         <!-- 2. 余额主卡片 -->
         <section class="balance-card" id="balanceCard">
           <div class="balance-label">可用余额（元）</div>
@@ -62,57 +72,49 @@
           </div>
         </section>
 
-        <!-- 2.5 Token 用量卡片 -->
+        <!-- 2.5 全平台用量卡片（官方导出 CSV / 登录态自动拉取，只统计金额） -->
         <section class="settings-card usage-card">
           <div class="usage-head">
-            <div class="settings-title" style="margin-bottom:0;">Token 用量</div>
-            <div class="seg" role="tablist">
-              <button id="scopeTodayBtn" class="seg-btn active" type="button">今日</button>
-              <button id="scopeTotalBtn" class="seg-btn" type="button">累计</button>
-            </div>
+            <div class="settings-title" style="margin-bottom:0;">全平台用量（金额）</div>
           </div>
 
-          <div class="hit-grid">
-            <div class="hit-box miss">
-              <div class="hit-label">缓存未命中</div>
-              <div class="hit-value" id="missTokens">0</div>
+          <div class="source-panel" id="billPanel">
+            <div class="bill-toolbar">
+              <select id="billMonthSelect" class="text-input" title="选择账单月份"></select>
+              <button id="billAutoBtn" class="mini-btn" type="button" title="用浏览器登录态自动拉取用量">自动拉取</button>
             </div>
-            <div class="hit-box hit">
-              <div class="hit-label">缓存命中</div>
-              <div class="hit-value" id="hitTokens">0</div>
-            </div>
-          </div>
-          <div class="hit-bar" title="缓存命中占输入 token 的比例">
-            <span id="hitBarFill" class="hit-bar-fill"></span>
-          </div>
-          <div class="hit-rate" id="hitRate">缓存命中率 --</div>
 
-          <div class="usage-grid">
-            <div class="mini-stat-light">
-              <div class="mini-label">输入</div>
-              <div class="mini-value" id="promptTokens">0</div>
+            <!-- 导入区：点击或拖拽 -->
+            <div class="bill-drop" id="billDrop" role="button" tabindex="0"
+                 title="点击选择文件，或将官方用量压缩包/CSV 拖到此处">
+              <input type="file" id="billFileInput" accept=".zip,.csv" multiple hidden />
+              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+                <path fill="currentColor" d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+              </svg>
+              <div class="drop-text">点击或拖拽导入官方用量压缩包 / CSV</div>
+              <div class="drop-sub">platform.deepseek.com/usage → 选择月份 → 导出</div>
             </div>
-            <div class="mini-stat-light">
-              <div class="mini-label">输出</div>
-              <div class="mini-value" id="completionTokens">0</div>
-            </div>
-            <div class="mini-stat-light">
-              <div class="mini-label">总 Tokens</div>
-              <div class="mini-value" id="totalTokens">0</div>
-            </div>
-            <div class="mini-stat-light">
-              <div class="mini-label">请求次数</div>
-              <div class="mini-value" id="requestCount">0</div>
-            </div>
-          </div>
 
-          <div class="model-list" id="modelList"></div>
+            <div class="bill-warnings" id="billWarnings" hidden></div>
 
-          <div class="usage-foot">
-            <span class="foot-note" title="扩展通过在网页内拦截 DeepSeek 接口响应来统计 token；在你自己服务器/后端发起的调用，浏览器扩展无法捕获。流式(SSE)响应需请求时带 stream_options.include_usage=true 才会返回 usage。">
-              仅统计浏览器页面内发起的 DeepSeek 调用（含官方平台页）
-            </span>
-            <button id="resetUsageBtn" class="link-btn" type="button">清空统计</button>
+            <!-- 账单金额统计 -->
+            <div class="bill-body" id="billBody" hidden>
+              <div class="bill-amount-row">
+                <div class="bill-amount-label">本月花费（元）</div>
+                <div class="bill-amount-value" id="billAmount">0.00</div>
+              </div>
+              <div class="bill-wallet" id="billWallet" hidden></div>
+
+              <div class="bill-sub-title">按 API Key</div>
+              <div class="bill-breakdown" id="billKeyList"></div>
+              <div class="bill-sub-title">按模型</div>
+              <div class="bill-breakdown" id="billModelList"></div>
+            </div>
+
+            <div class="usage-foot">
+              <span class="foot-note" id="billUpdated">尚未导入账单</span>
+              <button id="billClearBtn" class="link-btn" type="button">清空账单</button>
+            </div>
           </div>
         </section>
       </main>
@@ -195,15 +197,7 @@
             <button class="refresh-notice-close" id="widgetModeNoticeClose" type="button"
                     title="关闭提示" aria-label="关闭刷新提示">&times;</button>
           </div>
-          <div class="field-hint">浮窗默认显示在所有网页中，实时展示余额与今日 token 用量；悬浮模式下可在任意页面拖拽</div>
-
-          <label class="field-label">用量监控站点（可选）</label>
-          <div class="site-row">
-            <input type="text" id="siteInput" class="text-input" placeholder="https://chat.example.com" spellcheck="false" />
-            <button id="addSiteBtn" class="add-btn" type="button">添加</button>
-          </div>
-          <div id="siteList" class="site-list"></div>
-          <div class="field-hint" id="siteHint">默认已监控 DeepSeek 官方平台页；若你在其他网页客户端中调用 API，添加其网址（授权后刷新该页）即可统计 token 用量</div>
+          <div class="field-hint">浮窗默认显示在所有网页中，实时展示余额；悬浮模式下可在任意页面拖拽</div>
         </div>
       </section>
 
@@ -216,6 +210,7 @@
     </footer>
 
   </div>
+  <script src="bill.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

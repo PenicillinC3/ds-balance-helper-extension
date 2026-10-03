@@ -16,6 +16,9 @@
  * ============================================================
  */
 
+// 全平台账单解析（官方导出 CSV 归一化与聚合），与 popup、平台页共用同一套纯逻辑
+importScripts('bill.js');
+
 const API_URL = 'https://api.deepseek.com/user/balance';
 const ALARM_NAME = 'ds-balance-refresh';
 const NOTIFICATION_ID = 'ds-low-balance';
@@ -48,6 +51,24 @@ async function getSettings() {
 async function getApiKey() {
   const { ds_api_key: key } = await getLocal('ds_api_key');
   return (key || '').trim();
+}
+
+/* -------------------------- 写操作串行化 -------------------------- */
+
+/**
+ * chrome.storage 的「读 → 改 → 写」不是原子操作：两个并发调用会读到同一份
+ * 旧快照，后写的结果把先写的整个覆盖掉。真实后果：定时刷新与手动刷新并发、
+ * 或期间发生充值/扣费时，已累计的消耗金额会被覆盖（消耗少记）。
+ * Service Worker 是单线程的，因此把所有写操作挂到同一条 Promise 链上排队即可。
+ * @param {() => Promise<any>} task
+ */
+let writeChain = Promise.resolve();
+
+function serializeWrite(task) {
+  const run = writeChain.then(task, task);
+  // 单个任务失败不能阻断后续任务：这里把结果与异常都吞掉再续链
+  writeChain = run.then(() => {}, () => {});
+  return run;
 }
 
 /* -------------------------- 定时任务管理 -------------------------- */
@@ -179,38 +200,43 @@ async function refreshAndStore(opts = {}) {
   const d = result.data;
 
   // ---- 本地累计消耗统计：本次可用余额较上次下降的差值视为消耗 ----
-  const { ds_prev_balance: prev, ds_consumed: consumedSoFar } =
-    await getLocal(['ds_prev_balance', 'ds_consumed']);
-  let consumed = Number(consumedSoFar) || 0;
-  if (typeof prev === 'number' && d.available < prev) {
-    consumed += prev - d.available;
-  }
-  consumed = Math.round(consumed * 10000) / 10000; // 保留 4 位小数，避免浮点误差
+  // 读-改-写必须排队：并发刷新（定时任务 + 手动刷新 + 充值）时，
+  // 后写的结果会覆盖前一次已记下的下降值，导致消耗少记。
+  return serializeWrite(async () => {
+    const { ds_prev_balance: prev, ds_consumed: consumedSoFar } =
+      await getLocal(['ds_prev_balance', 'ds_consumed']);
+    let consumed = Number(consumedSoFar) || 0;
+    if (typeof prev === 'number' && d.available < prev) {
+      consumed += prev - d.available;
+    }
+    consumed = Math.round(consumed * 10000) / 10000; // 保留 4 位小数，避免浮点误差
 
-  // 若官方未来返回总额度字段，可在此扩展（totalQuota）
-  const totalQuota =
-    d.raw && typeof d.raw.total_quota !== 'undefined' ? Number(d.raw.total_quota) : null;
+    // 若官方未来返回总额度字段，可在此扩展（totalQuota）
+    const totalQuota =
+      d.raw && typeof d.raw.total_quota !== 'undefined' ? Number(d.raw.total_quota) : null;
 
-  const data = {
-    isAvailable: d.isAvailable,
-    currency: d.currency,
-    available: d.available,
-    toppedUp: d.toppedUp,
-    granted: d.granted,
-    totalQuota: Number.isFinite(totalQuota) ? totalQuota : null,
-    consumed,
-    fetchedAt
-  };
+    const data = {
+      isAvailable: d.isAvailable,
+      currency: d.currency,
+      available: d.available,
+      toppedUp: d.toppedUp,
+      granted: d.granted,
+      totalQuota: Number.isFinite(totalQuota) ? totalQuota : null,
+      consumed,
+      fetchedAt
+    };
 
-  await setLocal({
-    ds_last_data: data,
-    ds_prev_balance: d.available,
-    ds_consumed: consumed,
-    ds_last_error: null // 查询成功，清除历史错误
+    await setLocal({
+      ds_last_data: data,
+      ds_prev_balance: d.available,
+      ds_consumed: consumed,
+      ds_last_error: null // 查询成功，清除历史错误
+    });
+
+    // 低余额状态判断同样是对 ds_alert 的读-改-写，一并放进队列，避免重复提醒
+    await maybeAlert(d.available);
+    return { ok: true, data };
   });
-
-  await maybeAlert(d.available);
-  return { ok: true, data };
 }
 
 /* -------------------------- 低余额提醒 -------------------------- */
@@ -287,114 +313,153 @@ async function openPopupFromNotification() {
   }
 }
 
-/* ---------------------- Token 用量统计（浏览器拦截） ---------------------- */
+/* ------------------ 全平台账单：登录态自动拉取 ------------------ */
 
-function emptyBucket(date) {
-  return {
-    date: date || null,
-    requests: 0,
-    prompt: 0,
-    completion: 0,
-    total: 0,
-    hit: 0,
-    miss: 0
-  };
-}
+const PLATFORM_URL = 'https://platform.deepseek.com';
+const USAGE_PAGE_URL = PLATFORM_URL + '/usage';
+// 与 manifest 里注册的内容脚本保持一致
+const PLATFORM_CONTENT_SCRIPTS = ['bill.js', 'platform-export.js'];
 
-function emptyUsage() {
-  return {
-    total: emptyBucket(),
-    today: emptyBucket(localDate()),
-    models: {},
-    lastRequestAt: null
-  };
-}
-
-function localDate(d) {
-  const dt = d || new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`;
-}
-
-function addBucket(bucket, rec) {
-  bucket.requests += 1;
-  bucket.prompt += rec.prompt || 0;
-  bucket.completion += rec.completion || 0;
-  bucket.total += rec.total || 0;
-  bucket.hit += rec.hit || 0;
-  bucket.miss += rec.miss || 0;
+/** 把异常整理成一行可读文本，便于展示给用户 */
+function describeError(e) {
+  if (!e) return '未知错误';
+  if (e.message) return e.message;
+  return String(e);
 }
 
 /**
- * 接收内容脚本拦截到的单条 usage 并汇总：
- * total（累计）、today（按本地日期滚动）、models（按模型分组）。
+ * 从匹配到的平台标签页里挑一个最合适的：
+ * 优先「用量信息」页（/usage），其次未被浏览器冻结丢弃的，最后是当前活动页。
  */
-async function recordUsage(rec) {
-  if (!rec || typeof rec !== 'object') return;
-  // 基本合法性校验，丢弃脏数据
-  ['prompt', 'completion', 'total', 'hit', 'miss'].forEach((k) => {
-    if (!Number.isFinite(Number(rec[k]))) rec[k] = 0;
-  });
-  if (!rec.total && !rec.prompt && !rec.completion) return;
-
-  const { ds_usage: stored } = await getLocal('ds_usage');
-  const usage = stored && stored.total ? stored : emptyUsage();
-  if (!usage.models) usage.models = {};
-
-  addBucket(usage.total, rec);
-
-  const today = localDate();
-  if (!usage.today || usage.today.date !== today) {
-    usage.today = emptyBucket(today); // 跨天自动重置今日统计
-  }
-  addBucket(usage.today, rec);
-
-  if (rec.model) {
-    if (!usage.models[rec.model]) usage.models[rec.model] = emptyBucket();
-    addBucket(usage.models[rec.model], rec);
-  }
-
-  usage.lastRequestAt = rec.ts || Date.now();
-  await setLocal({ ds_usage: usage });
+function pickPlatformTab(tabs) {
+  const score = (tab) => {
+    let s = 0;
+    try {
+      const path = new URL(tab.url || '').pathname.replace(/\/+$/, '');
+      if (path === '/usage') s += 100;
+    } catch (e) { /* URL 解析失败则不加分 */ }
+    if (!tab.discarded) s += 10;
+    if (tab.active) s += 1;
+    return s;
+  };
+  return tabs.slice().sort((a, b) => score(b) - score(a))[0];
 }
 
 /**
- * 根据用户在弹窗中添加的监控站点（ds_sites，origin 数组），
- * 动态注册 MAIN world 拦截器 + bridge（用于 token 用量采集）。
- * 官方平台 platform.deepseek.com 已在 manifest 中静态注册；
- * 页面浮窗 widget.js 已通过 <all_urls> 静态注入所有页面，无需动态注册。
+ * 往标签页里现场注入内容脚本。
+ *
+ * 场景：扩展被重载后，**已经打开的页面**里的内容脚本会失效（旧扩展实例的
+ * 上下文被销毁），页面看着正常但再也唤不醒，`tabs.sendMessage` 会抛
+ * "Receiving end does not exist"。此时注入一份新的即可，无需用户手动刷新。
+ *
+ * 注入前先清掉"已注册"标记：能走到这里就说明原来的监听器已经失效
+ * （否则上一步 sendMessage 就成功了），必须允许重新注册。
  */
-async function setupDynamicMonitors() {
-  const ids = ['ds-monitor-main', 'ds-monitor-bridge'];
-  try {
-    await chrome.scripting.unregisterContentScripts({ ids });
-  } catch (e) { /* 尚未注册时忽略 */ }
-
-  const { ds_sites: sites = [] } = await getLocal('ds_sites');
-  const matches = (sites || [])
-    .map((s) => String(s).trim().replace(/\/+$/, ''))
-    .filter(Boolean)
-    .map((origin) => origin + '/*');
-
-  if (!matches.length) return;
-
-  await chrome.scripting.registerContentScripts([
-    {
-      id: 'ds-monitor-main',
-      matches,
-      js: ['interceptor-main.js'],
-      world: 'MAIN',
-      runAt: 'document_start',
-      allFrames: true
-    },
-    {
-      id: 'ds-monitor-bridge',
-      matches,
-      js: ['interceptor-bridge.js'],
-      runAt: 'document_start',
-      allFrames: true
+async function injectPlatformScripts(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      try { delete window.__DS_PLATFORM_EXPORT_LOADED__; } catch (e) { /* 忽略 */ }
     }
-  ]);
+  });
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: PLATFORM_CONTENT_SCRIPTS
+  });
+}
+
+/**
+ * 用平台页面的登录态拉取全平台用量，并写入账单存储。
+ *
+ * 为什么后台不自己发这个请求：官方用量导出接口用
+ * `Authorization: Bearer <userToken>` 鉴权（不接受 cookie），而该令牌只存在
+ * 于平台页面的 localStorage 中，后台读不到。因此后台只负责找到平台标签页、
+ * 把任务转交给页面里的 platform-export.js，再把结果入库。
+ *
+ * @param {string} [month] 'YYYY-MM'，缺省按当前月
+ * @returns {Promise<{ok: true, month: string, records: number}
+ *                  | {ok: false, code: string, message: string, details?: string[]}>}
+ */
+async function fetchBillFromPlatform(month) {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: PLATFORM_URL + '/*' });
+  } catch (e) {
+    tabs = [];
+  }
+
+  if (!tabs || !tabs.length) {
+    return {
+      ok: false,
+      code: 'NO_TAB',
+      message: '请先在浏览器里打开并登录 ' + USAGE_PAGE_URL + '，再点自动拉取'
+    };
+  }
+
+  const tab = pickPlatformTab(tabs);
+  const range = DS_BILL.usageExportRange(month);
+  const request = { type: 'DS_PLATFORM_EXPORT', range };
+  const details = [];
+
+  let resp;
+  try {
+    resp = await chrome.tabs.sendMessage(tab.id, request);
+  } catch (e) {
+    // 内容脚本失效（典型：重载扩展后没刷新过的页面）→ 现场注入再试一次
+    details.push('首次通信失败：' + describeError(e));
+    try {
+      await injectPlatformScripts(tab.id);
+      details.push('已重新注入内容脚本并重试');
+      resp = await chrome.tabs.sendMessage(tab.id, request);
+    } catch (e2) {
+      details.push('注入后仍失败：' + describeError(e2));
+      details.push('目标标签页：' + (tab.url || ('#' + tab.id)));
+      return {
+        ok: false,
+        code: 'NO_CONTENT',
+        message: '无法在平台页面内执行拉取，请刷新 ' + USAGE_PAGE_URL + ' 后重试',
+        details: details
+      };
+    }
+  }
+
+  if (!resp || !resp.ok) {
+    return {
+      ok: false,
+      code: (resp && resp.code) || 'FAIL',
+      message: (resp && resp.message) || '自动拉取失败，请稍后重试或改用手动导入',
+      details: (resp && resp.details) || null
+    };
+  }
+
+  const { ds_bill_imports: stored } = await getLocal('ds_bill_imports');
+  const imports = stored && typeof stored === 'object' ? stored : {};
+  const warnings = Array.isArray(resp.warnings) ? resp.warnings : [];
+  const importedAt = Date.now();
+
+  // 按月分别归档（接口返回的数据可能跨月）
+  const next = { ...imports };
+  const months = resp.months && typeof resp.months === 'object'
+    ? resp.months
+    : { [resp.month || 'unknown']: { agg: resp.agg, records: resp.records || 0 } };
+
+  Object.keys(months).forEach((month) => {
+    next[month] = {
+      agg: months[month].agg,
+      source: 'auto',
+      importedAt: importedAt,
+      warnings: warnings
+    };
+  });
+
+  await setLocal({ ds_bill_imports: next });
+
+  return {
+    ok: true,
+    month: resp.month || Object.keys(months)[0] || 'unknown',
+    months: Object.keys(months),
+    records: resp.records || 0
+  };
 }
 
 /* -------------------------- 事件注册 -------------------------- */
@@ -406,7 +471,6 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     await setLocal({ ds_settings: DEFAULT_SETTINGS });
   }
   await setupAlarm();
-  await setupDynamicMonitors();
   // 首次安装且此前已导入过 Key（如同步重装）时立即查一次
   if (details.reason === 'install' && (await getApiKey())) {
     refreshAndStore();
@@ -425,29 +489,32 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-// 消息分发：手动刷新 / 内容脚本上报 token 用量
+// 消息分发：手动刷新余额 / 自动拉取账单 / 存活探测
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && message.type === 'DS_PING') {
+    // 供弹窗判断后台是否为同一版本：扩展重载后，已打开页面的脚本会失效，
+    // 弹窗探测不到响应时即可提示用户重新加载扩展。
+    sendResponse({ ok: true, version: chrome.runtime.getManifest().version });
+    return false;
+  }
   if (message && message.type === 'DS_REFRESH') {
     refreshAndStore({ manual: true }).then(sendResponse);
     return true; // 异步 sendResponse，必须返回 true 保持消息通道
   }
-  if (message && message.type === 'DS_USAGE_RECORD' && message.record) {
-    recordUsage(message.record)
-      .then(() => sendResponse({ ok: true }))
+  if (message && message.type === 'DS_BILL_FETCH') {
+    fetchBillFromPlatform(message.month)
+      .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, message: String(e) }));
     return true;
   }
   return false;
 });
 
-// Key / 设置变化：重建闹钟（间隔修改立即生效）；监控站点变化：重注册内容脚本
+// Key / 设置变化：重建闹钟（间隔修改立即生效）
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
   if (changes.ds_api_key || changes.ds_settings) {
     setupAlarm();
-  }
-  if (changes.ds_sites) {
-    setupDynamicMonitors();
   }
 });
 

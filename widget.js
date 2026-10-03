@@ -2,12 +2,12 @@
  * ============================================================
  * widget.js - 应用内浮窗（ISOLATED world 内容脚本，仅顶层框架注入）
  * ============================================================
- * 在 DeepSeek 平台页 / 用户添加的监控站点内显示余额浮窗：
+ * 在访问的网页（顶层页面）内显示余额浮窗：
  *   - floating：可自由拖拽的悬浮窗（默认，位置本地记忆）
  *   - pinned ：固定在页面右上角常驻
  *   - off    ：不显示（设置面板中可切换回来）
  * 数据来自 chrome.storage.local（由后台 service worker 定时刷新），
- * 完整保留余额展示、token 用量（命中/未命中）、低余额预警提示。
+ * 展示可用余额、本地累计消耗与低余额预警提示。
  *
  * 样式与事件全部封装在 Shadow DOM 内，不污染宿主页，也不受宿主页样式影响。
  * ============================================================
@@ -21,14 +21,13 @@
   if (window.__DS_WIDGET_BOOTED__) return;
   window.__DS_WIDGET_BOOTED__ = true;
 
-  const STORAGE_KEYS = ['ds_settings', 'ds_last_data', 'ds_last_error', 'ds_api_key', 'ds_usage', 'ds_widget_pos'];
+  const STORAGE_KEYS = ['ds_settings', 'ds_last_data', 'ds_last_error', 'ds_api_key', 'ds_widget_pos'];
   const DEFAULT_SETTINGS = { threshold: 5, alertsEnabled: true, refreshInterval: 10, widgetMode: 'floating' };
 
   const state = {
     settings: { ...DEFAULT_SETTINGS },
     data: null,
     error: null,
-    usage: null,
     key: '',
     pos: null
   };
@@ -38,14 +37,6 @@
   function formatMoney(n) {
     const num = Number(n);
     return Number.isFinite(num) ? num.toFixed(2) : '--.--';
-  }
-
-  function formatTokens(n) {
-    const num = Number(n) || 0;
-    if (num >= 100000000) return (num / 100000000).toFixed(1) + '亿';
-    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-    if (num >= 10000) return (num / 1000).toFixed(1) + 'k';
-    return num.toLocaleString('en-US');
   }
 
   function formatTime(ts) {
@@ -65,13 +56,6 @@
     const b = Number(balance);
     return !!(settings && settings.alertsEnabled !== false &&
       Number.isFinite(b) && Number.isFinite(t) && b <= t);
-  }
-
-  /** 缓存命中率（0-100），无输入数据时返回 null */
-  function hitRate(hit, miss) {
-    const h = Number(hit) || 0;
-    const m = Number(miss) || 0;
-    return h + m > 0 ? (h / (h + m)) * 100 : null;
   }
 
   /* ----------------------------- Shadow DOM 构建 ----------------------------- */
@@ -165,20 +149,6 @@
 
     .ds-sub { font-size: 11px; color: #6b7280; margin-top: 2px; }
 
-    .ds-usage {
-      margin-top: 9px;
-      display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
-    }
-    .ds-chip { border-radius: 8px; padding: 6px 9px; }
-    .ds-chip.hit { background: #ecf8f1; }
-    .ds-chip.miss { background: #fff5ec; }
-    .ds-chip .k { display: block; font-size: 10px; color: #6b7280; }
-    .ds-chip.hit .v { color: #18a058; }
-    .ds-chip.miss .v { color: #e07b16; }
-    .ds-chip .v { display: block; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
-
-    .ds-meta { margin-top: 7px; font-size: 10.5px; color: #6b7280; line-height: 1.5; }
-
     .ds-foot {
       margin-top: 8px; padding-top: 7px; border-top: 1px solid #f0f1f5;
       font-size: 10.5px; color: #9ca3af;
@@ -217,11 +187,6 @@
           <div class="ds-balance-label">可用余额（元）</div>
           <div class="ds-balance"><span class="cur">¥</span><span id="ds-balance">--.--</span></div>
           <div class="ds-sub" id="ds-sub">已消耗 ¥0.00（本地统计）</div>
-          <div class="ds-usage">
-            <div class="ds-chip miss"><span class="k">缓存未命中</span><span class="v" id="ds-miss">0</span></div>
-            <div class="ds-chip hit"><span class="k">缓存命中</span><span class="v" id="ds-hit">0</span></div>
-          </div>
-          <div class="ds-meta" id="ds-meta">命中率 -- · 总 tokens 0 · 请求 0 次（今日）</div>
         </div>
         <div class="ds-error" id="ds-error" hidden></div>
         <div class="ds-foot">
@@ -245,7 +210,6 @@
     state.settings = { ...DEFAULT_SETTINGS, ...(stored.ds_settings || {}) };
     state.data = stored.ds_last_data || null;
     state.error = stored.ds_last_error || null;
-    state.usage = stored.ds_usage || null;
     state.key = stored.ds_api_key || '';
     state.pos = stored.ds_widget_pos || null;
   }
@@ -349,15 +313,6 @@
     if (state.key && state.data) {
       ui.balance.textContent = formatMoney(state.data.available);
       ui.sub.textContent = `已消耗 ¥${formatMoney(state.data.consumed || 0)}（本地统计）`;
-
-      const today = state.usage && state.usage.today ? state.usage.today : null;
-      const hit = today ? today.hit : 0;
-      const miss = today ? today.miss : 0;
-      const rate = hitRate(hit, miss);
-      ui.hit.textContent = formatTokens(hit);
-      ui.miss.textContent = formatTokens(miss);
-      ui.meta.textContent = `命中率 ${rate === null ? '--' : rate.toFixed(1) + '%'} · 总 tokens ${formatTokens(today ? today.total : 0)} · 请求 ${today ? today.requests : 0} 次（今日）`;
-
       ui.alert.textContent = `余额不足：可用 ¥${formatMoney(state.data.available)}，已低于预警阈值 ¥${Number(state.settings.threshold).toFixed(2)}，请及时充值`;
     }
 
@@ -431,9 +386,6 @@
       main: shadow.getElementById('ds-main'),
       balance: shadow.getElementById('ds-balance'),
       sub: shadow.getElementById('ds-sub'),
-      hit: shadow.getElementById('ds-hit'),
-      miss: shadow.getElementById('ds-miss'),
-      meta: shadow.getElementById('ds-meta'),
       alert: shadow.getElementById('ds-alert'),
       error: shadow.getElementById('ds-error'),
       dot: shadow.getElementById('ds-dot'),
@@ -459,7 +411,6 @@
     if (changes.ds_settings) state.settings = { ...DEFAULT_SETTINGS, ...(changes.ds_settings.newValue || {}) };
     if (changes.ds_last_data) state.data = changes.ds_last_data.newValue || null;
     if (changes.ds_last_error) state.error = changes.ds_last_error.newValue || null;
-    if (changes.ds_usage) state.usage = changes.ds_usage.newValue || null;
     if (changes.ds_api_key) state.key = changes.ds_api_key.newValue || '';
     if (changes.ds_widget_pos) state.pos = changes.ds_widget_pos.newValue || null;
 
@@ -476,7 +427,7 @@
   }
 
   // 测试钩子：Node vm 中 document 不存在时仅导出纯函数
-  const pureApi = { formatMoney, formatTokens, formatTime, clamp, shouldAlert, hitRate, DEFAULT_SETTINGS };
+  const pureApi = { formatMoney, formatTime, clamp, shouldAlert, DEFAULT_SETTINGS };
   if (typeof globalThis.__dsWidgetTest === 'object' && globalThis.__dsWidgetTest !== null) {
     globalThis.__dsWidgetTest.api = pureApi;
   }

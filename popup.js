@@ -6,6 +6,7 @@
  * - 密钥输入（防抖）后自动保存并立即查询验证
  * - 阈值 / 提醒开关 / 刷新间隔修改后自动保存
  * - 手动刷新带加载态；后台定时刷新结果通过 storage 变更实时回显
+ * - 全平台用量（金额）：导入官方导出包或用登录态自动拉取
  * ============================================================
  */
 
@@ -16,8 +17,7 @@ const DEFAULT_SETTINGS = {
   widgetMode: 'floating'
 };
 
-const STORAGE_KEYS = ['ds_settings', 'ds_last_data', 'ds_last_error', 'ds_api_key', 'ds_usage', 'ds_sites'];
-const STATIC_MONITOR_SITE = 'https://platform.deepseek.com';
+const STORAGE_KEYS = ['ds_settings', 'ds_last_data', 'ds_last_error', 'ds_api_key', 'ds_bill_imports'];
 
 const el = {
   keyInput: document.getElementById('apiKeyInput'),
@@ -45,31 +45,29 @@ const el = {
   totalQuotaValue: document.getElementById('totalQuotaValue'),
   statusDot: document.getElementById('statusDot'),
   statusText: document.getElementById('statusText'),
-  // token 用量
-  scopeTodayBtn: document.getElementById('scopeTodayBtn'),
-  scopeTotalBtn: document.getElementById('scopeTotalBtn'),
-  hitTokens: document.getElementById('hitTokens'),
-  missTokens: document.getElementById('missTokens'),
-  hitBarFill: document.getElementById('hitBarFill'),
-  hitRate: document.getElementById('hitRate'),
-  promptTokens: document.getElementById('promptTokens'),
-  completionTokens: document.getElementById('completionTokens'),
-  totalTokens: document.getElementById('totalTokens'),
-  requestCount: document.getElementById('requestCount'),
-  modelList: document.getElementById('modelList'),
-  resetUsageBtn: document.getElementById('resetUsageBtn'),
-  // 监控站点
-  siteInput: document.getElementById('siteInput'),
-  addSiteBtn: document.getElementById('addSiteBtn'),
-  siteList: document.getElementById('siteList'),
-  siteHint: document.getElementById('siteHint')
+  // 全平台账单
+  billMonthSelect: document.getElementById('billMonthSelect'),
+  billAutoBtn: document.getElementById('billAutoBtn'),
+  billDrop: document.getElementById('billDrop'),
+  billFileInput: document.getElementById('billFileInput'),
+  billWarnings: document.getElementById('billWarnings'),
+  billBody: document.getElementById('billBody'),
+  billAmount: document.getElementById('billAmount'),
+  billWallet: document.getElementById('billWallet'),
+  billKeyList: document.getElementById('billKeyList'),
+  billModelList: document.getElementById('billModelList'),
+  billUpdated: document.getElementById('billUpdated'),
+  billClearBtn: document.getElementById('billClearBtn'),
+  // 扩展未重新加载提示
+  staleNotice: document.getElementById('staleNotice'),
+  staleNoticeText: document.getElementById('staleNoticeText'),
+  staleNoticeClose: document.getElementById('staleNoticeClose')
 };
 
 let refreshing = false;
 let keyDebounceTimer = null;
-let usageScope = 'today'; // today | total
-let currentUsage = null;
-let currentSites = [];
+let currentBills = {};       // ds_bill_imports：{ 月份: {agg, source, importedAt, warnings} }
+let currentBillMonth = null; // 当前查看的账单月份
 
 /* ------------------------------ 初始化 ------------------------------ */
 
@@ -83,14 +81,13 @@ async function init() {
   el.intervalSelect.value = String(settings.refreshInterval);
   el.widgetModeSelect.value = settings.widgetMode || 'floating';
 
-  currentUsage = stored.ds_usage || null;
-  currentSites = Array.isArray(stored.ds_sites) ? stored.ds_sites : [];
-  renderUsage();
-  renderSites();
+  currentBills = stored.ds_bill_imports || {};
+  initBillMonth();
+  renderBill();
   renderFromStorage(stored.ds_last_data, stored.ds_last_error);
   bindEvents();
 
-  // 后台自动刷新 / 内容脚本上报导致的数据变化，实时同步到弹窗
+  // 后台自动刷新 / 自动拉取导致的数据变化，实时同步到弹窗
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
     if (changes.ds_last_data || changes.ds_last_error) {
@@ -98,13 +95,14 @@ async function init() {
         renderFromStorage(s.ds_last_data, s.ds_last_error);
       });
     }
-    if (changes.ds_usage) {
-      currentUsage = changes.ds_usage.newValue || null;
-      renderUsage();
-    }
-    if (changes.ds_sites) {
-      currentSites = changes.ds_sites.newValue || [];
-      renderSites();
+    if (changes.ds_bill_imports) {
+      currentBills = changes.ds_bill_imports.newValue || {};
+      // 后台自动拉取写入后，若出现新月份，自动切到新月份
+      const months = billMonths();
+      if (!currentBillMonth || !months.includes(currentBillMonth)) {
+        currentBillMonth = months[0] || null;
+      }
+      renderBill();
     }
   });
 
@@ -119,6 +117,46 @@ async function init() {
     // 首次打开且未配置密钥：自动展开设置面板并聚焦输入框，引导用户输入
     setSettingsOpen(true, true);
   }
+
+  checkBackgroundAlive();
+}
+
+/**
+ * 自检：后台是否为「同一份代码」。
+ *
+ * 扩展以「加载已解压的扩展程序」方式使用时，改动磁盘上的文件不会自动生效——
+ * 弹窗每次打开都会重新读盘，而 service worker 一旦启动就一直跑内存里的旧版本。
+ * 两者版本不一致（或后台完全不响应）时，功能会以难以理解的方式失败，
+ * 所以这里主动提示用户重新加载扩展。
+ */
+async function checkBackgroundAlive() {
+  let resp;
+  try {
+    resp = await chrome.runtime.sendMessage({ type: 'DS_PING' });
+  } catch (e) {
+    resp = null;
+  }
+
+  const myVersion = chrome.runtime.getManifest().version;
+
+  if (!resp || !resp.ok) {
+    showStaleNotice(`扩展后台未响应，功能可能无法使用。请在扩展管理页（chrome://extensions）点「重新加载」后重试。`);
+    return;
+  }
+  if (resp.version !== myVersion) {
+    showStaleNotice(`扩展后台仍是旧版本（界面 ${myVersion} / 后台 ${resp.version}），请到扩展管理页点「重新加载」以应用更新。`);
+  }
+}
+
+function showStaleNotice(text) {
+  el.staleNoticeText.textContent = text;
+  el.staleNotice.hidden = false;
+  requestAnimationFrame(() => layoutPages());
+}
+
+function hideStaleNotice() {
+  el.staleNotice.hidden = true;
+  requestAnimationFrame(() => layoutPages());
 }
 
 /**
@@ -183,6 +221,7 @@ function bindEvents() {
     showWidgetModeNotice();
   });
   el.widgetModeNoticeClose.addEventListener('click', hideWidgetModeNotice);
+  el.staleNoticeClose.addEventListener('click', hideStaleNotice);
 
   // 齿轮：切换设置页滑入 / 滑出
   el.settingsBtn.addEventListener('click', () => {
@@ -191,7 +230,7 @@ function bindEvents() {
   // 设置页左上角返回箭头
   el.settingsBackBtn.addEventListener('click', () => setSettingsOpen(false));
 
-  // 两页内容高度变化（数据渲染、站点增删等）时，容器高度始终贴合当前页
+  // 两页内容高度变化（数据渲染等）时，容器高度始终贴合当前页
   if (typeof ResizeObserver !== 'undefined') {
     const ro = new ResizeObserver(() => layoutPages());
     ro.observe(el.mainPage);
@@ -199,153 +238,235 @@ function bindEvents() {
   }
   window.addEventListener('resize', layoutPages);
 
-  // 手动刷新
+  // 手动刷新余额
   el.refreshBtn.addEventListener('click', doRefresh);
 
-  // Token 用量：今日 / 累计切换、清空
-  el.scopeTodayBtn.addEventListener('click', () => setUsageScope('today'));
-  el.scopeTotalBtn.addEventListener('click', () => setUsageScope('total'));
-  el.resetUsageBtn.addEventListener('click', resetUsage);
-
-  // 监控站点
-  el.addSiteBtn.addEventListener('click', addSite);
-  el.siteInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') addSite();
+  // 账单：月份切换、文件选择、拖拽导入、自动拉取、清空
+  el.billMonthSelect.addEventListener('change', () => {
+    currentBillMonth = el.billMonthSelect.value || null;
+    renderBill();
   });
+  el.billDrop.addEventListener('click', () => el.billFileInput.click());
+  el.billDrop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') el.billFileInput.click();
+  });
+  el.billFileInput.addEventListener('change', () => {
+    importBillFiles(Array.from(el.billFileInput.files || []));
+    el.billFileInput.value = ''; // 允许重复导入同一文件
+  });
+  ['dragenter', 'dragover'].forEach((evt) => {
+    el.billDrop.addEventListener(evt, (e) => {
+      e.preventDefault();
+      el.billDrop.classList.add('dragover');
+    });
+  });
+  ['dragleave', 'drop'].forEach((evt) => {
+    el.billDrop.addEventListener(evt, (e) => {
+      e.preventDefault();
+      el.billDrop.classList.remove('dragover');
+    });
+  });
+  el.billDrop.addEventListener('drop', (e) => {
+    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if (files.length) importBillFiles(files);
+  });
+  el.billAutoBtn.addEventListener('click', autoFetchBill);
+  el.billClearBtn.addEventListener('click', clearBills);
 }
 
-/* ------------------------ Token 用量渲染 ------------------------ */
+/* ------------------------ 全平台账单（金额） ------------------------ */
 
-function setUsageScope(scope) {
-  usageScope = scope;
-  el.scopeTodayBtn.classList.toggle('active', scope === 'today');
-  el.scopeTotalBtn.classList.toggle('active', scope === 'total');
-  renderUsage();
+/** 月份列表（降序，含可能的“未识别”） */
+function billMonths() {
+  return Object.keys(currentBills).sort((a, b) => (a < b ? 1 : -1));
 }
 
-function renderUsage() {
-  const b = currentUsage
-    ? (usageScope === 'today' ? currentUsage.today : currentUsage.total)
-    : null;
+/** 初始化账单月份：默认最新月份 */
+function initBillMonth() {
+  const months = billMonths();
+  currentBillMonth = months[0] || null;
+}
 
-  const requests = b ? b.requests : 0;
-  const hit = b ? b.hit : 0;
-  const miss = b ? b.miss : 0;
-  const prompt = b ? b.prompt : 0;
-  const completion = b ? b.completion : 0;
-  const total = b ? b.total : 0;
+/** 渲染整个账单面板（月份下拉 + 金额 + 明细） */
+function renderBill() {
+  const months = billMonths();
 
-  el.hitTokens.textContent = formatTokens(hit);
-  el.hitTokens.title = `${hit.toLocaleString('en-US')} tokens`;
-  el.missTokens.textContent = formatTokens(miss);
-  el.missTokens.title = `${miss.toLocaleString('en-US')} tokens`;
-  el.promptTokens.textContent = formatTokens(prompt);
-  el.completionTokens.textContent = formatTokens(completion);
-  el.totalTokens.textContent = formatTokens(total);
-  el.requestCount.textContent = requests.toLocaleString('en-US');
-
-  const inputBase = hit + miss;
-  const rate = inputBase > 0 ? (hit / inputBase) * 100 : 0;
-  el.hitBarFill.style.width = `${rate.toFixed(1)}%`;
-  el.hitRate.textContent = inputBase > 0
-    ? `缓存命中率 ${rate.toFixed(1)}%`
-    : '缓存命中率 --';
-
-  // 按模型明细（仅累计视图展示完整分组）
-  const models = currentUsage && currentUsage.models ? currentUsage.models : {};
-  const names = Object.keys(models).sort((a, b2) => models[b2].requests - models[a].requests);
-  if (usageScope === 'total' && names.length) {
-    el.modelList.innerHTML = names.slice(0, 5).map((name) => {
-      const m = models[name];
-      return `<div class="model-row">
-        <span class="model-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-        <span class="model-tokens">${m.requests} 次 · ${formatTokens(m.total)}</span>
-      </div>`;
-    }).join('');
+  // 月份下拉
+  el.billMonthSelect.innerHTML = months.map((m) =>
+    `<option value="${escapeHtml(m)}">${m === 'unknown' ? '未识别月份' : m}</option>`
+  ).join('');
+  if (currentBillMonth && months.includes(currentBillMonth)) {
+    el.billMonthSelect.value = currentBillMonth;
   } else {
-    el.modelList.innerHTML = '';
+    currentBillMonth = months[0] || null;
   }
+
+  const entry = currentBillMonth ? currentBills[currentBillMonth] : null;
+  if (!entry || !entry.agg) {
+    el.billBody.hidden = true;
+    el.billWarnings.hidden = true;
+    el.billUpdated.textContent = '尚未导入账单';
+    requestAnimationFrame(() => layoutPages());
+    return;
+  }
+
+  const t = entry.agg.total || { amount: 0, rows: 0 };
+  el.billBody.hidden = false;
+  el.billAmount.textContent = formatMoney(t.amount);
+  renderWallet(entry.agg.wallet);
+  renderBreakdown(el.billKeyList, entry.agg.byKey);
+  renderBreakdown(el.billModelList, entry.agg.byModel);
+
+  // 警告（缺文件等）
+  const ws = Array.isArray(entry.warnings) ? entry.warnings : [];
+  if (ws.length) {
+    el.billWarnings.hidden = false;
+    el.billWarnings.innerHTML = ws.map((w) =>
+      `<div class="bill-warn-row">${escapeHtml(w)}</div>`
+    ).join('');
+  } else {
+    el.billWarnings.hidden = true;
+  }
+
+  const srcLabel = entry.source === 'auto' ? '自动拉取' : '文件导入';
+  el.billUpdated.textContent = `${srcLabel}于 ${formatTime(entry.importedAt)}`;
+  requestAnimationFrame(() => layoutPages());
 }
 
-async function resetUsage() {
-  await chrome.storage.local.set({ ds_usage: null });
-  currentUsage = null;
-  renderUsage();
+/** 充值 / 赠送消费拆分（官方 cost 明细按 wallet_type 给出） */
+function renderWallet(wallet) {
+  const entries = Object.entries(wallet || {}).filter(([, v]) => v > 0);
+  if (!entries.length) {
+    el.billWallet.hidden = true;
+    el.billWallet.innerHTML = '';
+    return;
+  }
+  const label = { Paid: '充值余额', Granted: '赠送余额' };
+  el.billWallet.hidden = false;
+  el.billWallet.innerHTML = entries
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<span class="wallet-chip">${escapeHtml(label[k] || k)} ¥${formatMoney(v)}</span>`)
+    .join('');
 }
 
-/* ------------------------ 监控站点管理 ------------------------ */
-
-function renderSites() {
-  const chips = [
-    `<span class="site-chip static" title="内置静态监控">
-       <span class="site-name">${STATIC_MONITOR_SITE}</span>
-     </span>`
-  ];
-  currentSites.forEach((origin) => {
-    chips.push(`<span class="site-chip">
-      <span class="site-name" title="${escapeHtml(origin)}">${escapeHtml(origin)}</span>
-      <button class="chip-x" type="button" data-site="${escapeHtml(origin)}" title="移除">&times;</button>
-    </span>`);
-  });
-  el.siteList.innerHTML = chips.join('');
-
-  el.siteList.querySelectorAll('.chip-x').forEach((btn) => {
-    btn.addEventListener('click', () => removeSite(btn.dataset.site));
-  });
+/**
+ * 渲染分 Key / 分模型金额明细（按金额降序，最多 8 行）
+ * @param {boolean} byKey true=按 Key（金额来自用量明细反推）
+ */
+function renderBreakdown(container, groups) {
+  const names = Object.keys(groups || {});
+  names.sort((a, b) => groups[b].amount - groups[a].amount);
+  if (!names.length) {
+    container.innerHTML = '<div class="bill-empty">无明细</div>';
+    return;
+  }
+  container.innerHTML = names.slice(0, 8).map((name) => {
+    const g = groups[name];
+    return `<div class="bill-row">
+      <div class="bill-row-left">
+        <div class="bill-row-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+        <div class="bill-row-sub">${g.rows} 条记录</div>
+      </div>
+      <div class="bill-row-right">¥${formatMoney(g.amount)}</div>
+    </div>`;
+  }).join('');
 }
 
-async function addSite() {
-  const raw = el.siteInput.value.trim();
-  if (!raw) return;
-
-  let origin;
+/**
+ * 导入用户选择的文件（zip / csv），解析后按月合并入 ds_bill_imports。
+ * 同一月份重复导入时直接覆盖（以最新文件为准）。
+ */
+async function importBillFiles(files) {
+  if (!files || !files.length) return;
+  el.billAutoBtn.disabled = true;
+  el.billUpdated.textContent = '正在解析账单文件…';
+  let result;
   try {
-    const u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
-    if (!/^https?:$/.test(u.protocol)) throw new Error('bad protocol');
-    origin = u.origin;
+    result = await DS_BILL.parseFiles(files);
   } catch (e) {
-    setSiteHint('网址格式不正确，请输入如 https://chat.example.com 的网址', true);
+    el.billUpdated.textContent = '解析失败：' + (e && e.message ? e.message : e);
+    el.billAutoBtn.disabled = false;
     return;
   }
 
-  if (origin === STATIC_MONITOR_SITE || currentSites.includes(origin)) {
-    setSiteHint('该站点已在监控列表中', true);
+  if (!result.records.length) {
+    // 解析不到任何记录：保留警告并展示
+    const month = result.month || 'unknown';
+    currentBills = {
+      ...currentBills,
+      [month]: {
+        agg: DS_BILL.aggregate([]),
+        source: 'csv',
+        importedAt: Date.now(),
+        warnings: result.warnings.length ? result.warnings : ['未从文件中解析到任何金额记录']
+      }
+    };
+    currentBillMonth = month;
+    await chrome.storage.local.set({ ds_bill_imports: currentBills });
+    renderBill();
+    el.billAutoBtn.disabled = false;
     return;
   }
 
-  const pattern = origin + '/*';
-  let granted = false;
+  // 按月分别归档：一次多选导入可能包含好几个月，不能并进同一个桶
+  const byMonth = DS_BILL.aggregateByMonth(result.records);
+  const next = { ...currentBills };
+  Object.keys(byMonth).forEach((month) => {
+    next[month] = {
+      agg: byMonth[month].agg,
+      source: 'csv',
+      importedAt: Date.now(),
+      files: result.files,
+      warnings: result.warnings
+    };
+  });
+  currentBills = next;
+
+  const months = billMonths();
+  currentBillMonth = months.includes(currentBillMonth) ? currentBillMonth : (months[0] || null);
+
+  await chrome.storage.local.set({ ds_bill_imports: currentBills });
+  renderBill();
+  el.billAutoBtn.disabled = false;
+}
+
+/** 让后台用登录态自动拉取用量 */
+async function autoFetchBill() {
+  el.billAutoBtn.disabled = true;
+  el.billUpdated.textContent = '正在用登录态自动拉取…';
+  let resp;
   try {
-    granted = await chrome.permissions.request({ origins: [pattern] });
+    resp = await chrome.runtime.sendMessage({
+      type: 'DS_BILL_FETCH',
+      month: currentBillMonth || null // 拉取当前查看的月份，未选时由后台取当月
+    });
   } catch (e) {
-    granted = false;
+    resp = { ok: false, message: '后台服务未响应，请关闭弹窗后重新打开' };
   }
-  if (!granted) {
-    setSiteHint('未授予站点权限，已取消添加', true);
-    return;
+  el.billAutoBtn.disabled = false;
+  if (!resp || !resp.ok) {
+    // 把失败原因连同细节一起展示，而不是只给一句"失败"
+    const message = (resp && resp.message) ||
+      '后台没有响应，扩展可能未重新加载：请到扩展管理页点「重新加载」后重试';
+    const rows = [`<div class="bill-warn-row">${escapeHtml(message)}</div>`];
+    if (resp && resp.code) {
+      rows.push(`<div class="bill-warn-row">错误码：${escapeHtml(resp.code)}</div>`);
+    }
+    const details = resp && Array.isArray(resp.details) ? resp.details : [];
+    details.forEach((d) => rows.push(`<div class="bill-warn-row">${escapeHtml(d)}</div>`));
+    el.billWarnings.hidden = false;
+    el.billWarnings.innerHTML = rows.join('');
+    el.billUpdated.textContent = '自动拉取未成功（可先手动导入）';
+    requestAnimationFrame(() => layoutPages());
   }
-
-  const next = [...currentSites, origin];
-  await chrome.storage.local.set({ ds_sites: next }); // storage 变更会触发 SW 动态注册
-  currentSites = next;
-  renderSites();
-  el.siteInput.value = '';
-  setSiteHint('已添加，请刷新该网页后生效', false);
+  // 成功时 storage.onChanged 会自动驱动 renderBill
 }
 
-async function removeSite(origin) {
-  try {
-    await chrome.permissions.remove({ origins: [origin + '/*'] });
-  } catch (e) { /* 忽略，仍从列表移除 */ }
-  const next = currentSites.filter((s) => s !== origin);
-  await chrome.storage.local.set({ ds_sites: next });
-  currentSites = next;
-  renderSites();
-}
-
-function setSiteHint(text, isError) {
-  el.siteHint.textContent = text;
-  el.siteHint.classList.toggle('error', !!isError);
+async function clearBills() {
+  currentBills = {};
+  currentBillMonth = null;
+  await chrome.storage.local.set({ ds_bill_imports: null });
+  renderBill();
 }
 
 /* ------------------------------ 存储操作 ------------------------------ */
@@ -484,15 +605,6 @@ function formatMoney(n) {
   const num = Number(n);
   if (!Number.isFinite(num)) return '--.--';
   return num.toFixed(2);
-}
-
-/** token 大数紧凑显示：1234 -> 1,234；12.3k；1.2M；精确值放 title */
-function formatTokens(n) {
-  const num = Number(n) || 0;
-  if (num >= 100000000) return `${(num / 100000000).toFixed(1)}亿`;
-  if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
-  if (num >= 10000) return `${(num / 1000).toFixed(1)}k`;
-  return num.toLocaleString('en-US');
 }
 
 function escapeHtml(s) {

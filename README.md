@@ -1,22 +1,21 @@
 # DeepSeek 余额助手（Chrome / Edge 扩展）
 
-实时监控 DeepSeek API 账户余额与 token 用量的轻量扩展，Manifest V3，纯原生 HTML + CSS + JavaScript，无任何第三方依赖。
+实时监控 DeepSeek API 账户余额与全平台花费金额的轻量扩展，Manifest V3，纯原生 HTML + CSS + JavaScript，无任何第三方依赖。
 
 ~~**贫穷的作者因为前端创作而不想单开一个网页页面去看剩多少钱而做出来的产物QAQ**~~
 
 ## 功能
 
 - **余额展示**：调用官方接口 `GET https://api.deepseek.com/user/balance`，大号字体显示可用余额，并展示充值余额、赠送余额、本地累计消耗、上次更新时间。
-- **Token 用量统计（缓存命中 / 未命中）**：
-  - 自动识别响应中的 `usage`，分别统计**缓存命中**（`prompt_cache_hit_tokens` / `cached_tokens` / `cache_read_input_tokens`）与**未命中**（`prompt_cache_miss_tokens` 等）token，并显示缓存命中率进度条；
-  - 同时统计输入、输出、总 tokens、请求次数，支持**今日 / 累计**切换，累计视图按模型分组；
-  - 兼容 OpenAI 兼容接口（`/chat/completions`、`/completions` FIM）、Responses API（`/responses`）、Anthropic 兼容接口（`/anthropic/v1/messages`）；
-  - 普通 JSON 与 SSE 流式响应均可识别（流式请求需在调用时设置 `stream_options.include_usage=true`，DeepSeek 官方 SDK 默认开启）。
+- **全平台用量金额（官方账单，覆盖所有平台 / 所有 Key）**：DeepSeek 官方没有提供用量查询 API，用量只能在开放平台「用量信息」页按月导出。扩展提供两种方式获取**全平台**口径（含任意客户端、服务器、命令行的调用，以及不同 API Key 的明细）：
+  - **手动导入（推荐，最稳定）**：在浏览器登录并打开 https://platform.deepseek.com/usage → 选择月份 → 点击「导出」，得到一个压缩包（内含两个 CSV：用量明细与花费明细）；打开扩展 →「全平台用量」卡片，点击或拖拽导入该 **ZIP / CSV**（可多选、可多次导入；一次导入多个月份时会**按月分别归档**，不会混在一起）。
+  - **登录态自动拉取**：先登录并打开 https://platform.deepseek.com/usage，然后点「自动拉取」，扩展会在该页面内直接调用官方用量导出接口（`/api/v0/usage/export`），取回与手动导出**完全相同**的压缩包并在本地解析，无需手动下载。若同时开着多个平台页面，会**优先使用「用量信息」页**；页面里的脚本若因扩展重载而失效，扩展会**自动重新注入**，无需手动刷新。鉴权使用该站点的登录令牌（`localStorage` 中的 `userToken`），令牌只在这一次请求里使用，不写入存储、也不发送给 DeepSeek 之外的任何地方。未登录、登录态失效、接口异常、该月无记录等都会给出具体原因（含错误码）；该接口非官方公开 API，官方改版可能失效，此时请用手动导入。
+  - **展示内容**：本月花费（元）、充值 / 赠送余额的消费拆分、按 **API Key** 的金额明细、按**模型**的金额明细，支持按月份切换。
+  - **金额口径**：官方导出的两个 CSV 里，`cost-*.csv` 的 `cost` 列才是金额（权威口径，用于总计、按模型、充值·赠送拆分）；`amount-*.csv` 是「一行一个指标」的用量明细，其中的 `amount` 列**不是金额**，其含义由 `type` 列决定（`output_tokens` / `input_cache_hit_tokens` / `input_cache_miss_tokens` / `request_count`）。由于花费明细没有 API Key 列，**按 Key 的金额**由用量明细的 `price × amount` 反推得出，与官方总额一致。两个文件描述的是**同一批调用**，不会被重复计算。
 - **API Key 管理**：弹窗内输入，密码框 + 显示/隐藏切换；输入后自动验证有效性；密钥仅保存在 `chrome.storage.local`，绝不上传第三方。
 - **低余额预警**：阈值可调（默认 5 元），一键开关；余额 ≤ 阈值时弹出浏览器系统通知，点击通知打开扩展弹窗；同一低余额状态 24 小时内只提醒 1 次。
 - **后台自动刷新**：service worker 通过 `chrome.alarms` 定时查询，可选 5 / 10 / 30 / 60 分钟（默认 10 分钟）；未配置 Key 时不启动轮询。
-- **自定义用量监控站点**：默认监控 DeepSeek 官方平台页（`platform.deepseek.com`）；若你在其他网页客户端里调用 DeepSeek API，可在设置中添加其网址（按需授权），扩展会注入拦截脚本统计该页用量。
-- **应用内浮窗（所有网页可用）**：浮窗默认注入到你访问的**每一个网页**（顶层页面），直接显示余额与今日 token 用量（Shadow DOM 隔离，不读取、不影响宿主页内容）。设置面板「页面浮窗显示模式」可切换：
+- **应用内浮窗（所有网页可用）**：浮窗默认注入到你访问的**每一个网页**（顶层页面），直接显示余额与本地累计消耗（Shadow DOM 隔离，不读取、不影响宿主页内容）。设置面板「页面浮窗显示模式」可切换：
   - **悬浮窗（默认）**：在任意网页都可按住标题栏自由拖拽，位置自动记忆，窗口缩放时自动收回可视区；
   - **常驻右上角**：固定在页面右上角，不可拖拽；
   - **不显示浮窗**：也可直接点击浮窗右上角 × 关闭，随时在设置中重新开启。
@@ -36,22 +35,34 @@
 
 ```
 deepseek-balance-helper/
-├── manifest.json          # MV3 配置（storage/notifications/alarms/scripting 权限）
-├── background.js          # 后台 SW：定时查询、预警通知、防重复、用量汇总、动态站点注册
-├── interceptor-main.js    # MAIN world 内容脚本：包装 fetch/XHR，提取 usage（含 SSE）
-├── interceptor-bridge.js  # ISOLATED world 桥接：把拦截结果转发给后台
+├── manifest.json          # MV3 配置（storage/notifications/alarms 权限）
+├── background.js          # 后台 SW：定时查询余额、预警通知、防重复、账单入库、写操作串行化
+├── bill.js                # 账单解析与聚合（官方导出 CSV/ZIP、按 Key/模型金额）+ 导出时间窗与令牌解析，popup / SW / 平台页共用
+├── platform-export.js     # 平台页内容脚本：用登录态调官方用量导出接口，解包聚合后交后台入库
 ├── widget.js              # 应用内浮窗（Shadow DOM，悬浮拖拽 / 右上角常驻双模式）
 ├── popup.html             # 弹窗页面结构
 ├── popup.css              # 弹窗样式（340px，DeepSeek 品牌蓝卡片式）
 ├── popup.js               # 弹窗交互与本地存储读写
+├── test/                  # Node 单测（node --test，零依赖）
+├── package.json           # 仅用于跑测试，无运行时依赖
+├── CHANGELOG.md           # 更新日志（每次改动都会记录）
 ├── icons/                 # 16 / 48 / 128 图标
 └── README.md
 ```
 
+## 开发与测试
+
+账单解析与聚合、导出时间窗与令牌解析、后台存储读写（含并发写竞态）都有 Node 单测覆盖，零第三方依赖：
+
+```bash
+npm test
+```
+
 ## 数据与隐私说明
 
-- 所有数据（API Key、设置、余额快照、用量统计）只保存在浏览器本地存储中。
-- 余额请求仅发往 `https://api.deepseek.com/*`，无任何第三方后端。
-- 浮窗虽注入所有网页，但**只读取扩展本地存储中的余额/用量数据用于展示**，不读取、不上传任何网页内容，也不向宿主页发送数据。
-- Token 用量通过在网页内只读拦截 DeepSeek 接口响应获得，**不修改任何请求/响应内容**，且拦截脚本仅注入 DeepSeek 官方平台页与你手动添加的监控站点；在你自己服务器/后端发起的调用，浏览器扩展无法捕获（这是浏览器扩展机制的固有限制）。
+- 所有数据（API Key、设置、余额快照、账单数据）只保存在浏览器本地存储中。
+- 网络请求仅发往 DeepSeek 官方域名：`https://api.deepseek.com/*`（余额）与 `https://platform.deepseek.com/*`（登录态拉取用量），无任何第三方后端。
+- 自动拉取用量时，在 platform.deepseek.com 页面内读取该站点的登录令牌 `userToken`（源自 `localStorage`），仅用于向 DeepSeek 官方域名发起那一次用量导出请求；令牌不写入任何存储、不外传，**也不会发送 API Key**。
+- 导入的账单文件（ZIP/CSV）完全在本地解析，不会上传任何服务器。
+- 浮窗虽注入所有网页，但**只读取扩展本地存储中的余额数据用于展示**，不读取、不上传任何网页内容，也不向宿主页发送数据。
 - DeepSeek 官方余额接口不返回“历史已消耗金额 / 总额度”，「已消耗」为本扩展依据相邻两次余额查询的下降差值在本地累计的估算值，卸载扩展即清零；「总额度」仅在接口返回该字段时自动显示。
