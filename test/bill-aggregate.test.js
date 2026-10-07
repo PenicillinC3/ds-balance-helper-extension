@@ -150,3 +150,108 @@ test('既没有金额也没有可反推数据时给出警告', async () => {
     `应提示没有可识别的账单明细，实际警告：${JSON.stringify(parsed.warnings)}`
   );
 });
+
+/* ------------------------- Token 用量 ------------------------- */
+
+const HIT = 135505536; // input_cache_hit_tokens
+const OUTPUT = 3419;    // output_tokens
+const CALLS = 1 + 1317; // request_count 行之和
+
+test('用量明细：按 type 汇总缓存命中 / 未命中 / 输出 / 请求次数', async () => {
+  const parsed = await BILL.parseFiles([csvFile('amount-2026-09-02_2026-10-01.csv', USAGE_CSV)]);
+  const agg = BILL.aggregate(parsed.records);
+
+  assert.equal(agg.total.tokens.hit, HIT, '缓存命中 token');
+  assert.equal(agg.total.tokens.miss, 0, '本样本没有未命中行');
+  assert.equal(agg.total.tokens.output, OUTPUT, '输出 token');
+  assert.equal(agg.total.tokens.requests, CALLS, 'request_count 行累加为请求次数');
+});
+
+test('request_count 行只计次数、不计金额', async () => {
+  const parsed = await BILL.parseFiles([csvFile('amount-2026-09-02_2026-10-01.csv', USAGE_CSV)]);
+  const agg = BILL.aggregate(parsed.records);
+
+  assert.equal(agg.total.tokens.requests, 1318);
+  close(agg.total.amount, USAGE_TAVO + USAGE_CLAUDE, '请求次数不能被当成金额');
+  assert.equal(agg.total.rows, 2, '请求次数行不应计入金额记录数');
+});
+
+test('两个文件都在时，token 仍来自用量明细（cost 文件没有 token 信息）', async () => {
+  const parsed = await BILL.parseFiles([
+    csvFile('cost-2026-09-02_2026-10-01.csv', COST_CSV),
+    csvFile('amount-2026-09-02_2026-10-01.csv', USAGE_CSV),
+  ]);
+  const agg = BILL.aggregate(parsed.records);
+
+  close(agg.total.amount, COST_TOTAL, '金额以 cost 文件为准');
+  assert.equal(agg.total.tokens.hit, HIT, 'token 不受金额口径切换影响');
+  assert.equal(agg.total.tokens.output, OUTPUT);
+  assert.equal(agg.total.tokens.requests, CALLS);
+});
+
+test('token 数量不会被当成金额，金额也不会被当成 token', async () => {
+  const parsed = await BILL.parseFiles([csvFile('amount-2026-09-02_2026-10-01.csv', USAGE_CSV)]);
+  const agg = BILL.aggregate(parsed.records);
+
+  assert.ok(agg.total.amount < 10, `总金额应是几元，实际 ${agg.total.amount}`);
+  assert.ok(agg.total.tokens.hit > 1e8, `命中 token 应是亿级，实际 ${agg.total.tokens.hit}`);
+});
+
+test('按 Key 与按模型分别给出 token 明细', async () => {
+  const parsed = await BILL.parseFiles([csvFile('amount-2026-09-02_2026-10-01.csv', USAGE_CSV)]);
+  const agg = BILL.aggregate(parsed.records);
+
+  assert.equal(agg.byKey['Claude Code'].tokens.hit, HIT);
+  assert.equal(agg.byKey['Claude Code'].tokens.requests, 1317);
+  assert.equal(agg.byKey['tavo'].tokens.output, OUTPUT);
+  assert.equal(agg.byKey['tavo'].tokens.requests, 1);
+  assert.equal(agg.byKey['tavo'].tokens.hit, 0, 'Key 之间的 token 不能串台');
+
+  assert.equal(agg.byModel['deepseek-v4-flash'].tokens.hit, HIT);
+  assert.equal(agg.byModel['deepseek-v4-pro'].tokens.output, OUTPUT);
+});
+
+test('按月归档时 token 也按月分开', async () => {
+  const crossMonth = [
+    'user_id,start_time_iso,end_time_iso,model,api_key_name,api_key,type,price,amount',
+    'u1,2026-09-06T00:00:00+08:00,2026-09-07T00:00:00+08:00,deepseek-v4-flash,k,sk-a,output_tokens,0.0000135,100',
+    'u1,2026-10-02T00:00:00+08:00,2026-10-03T00:00:00+08:00,deepseek-v4-flash,k,sk-a,output_tokens,0.0000135,7',
+    'u1,2026-10-02T00:00:00+08:00,2026-10-03T00:00:00+08:00,deepseek-v4-flash,k,sk-a,request_count,,3',
+  ].join('\n');
+
+  const parsed = await BILL.parseFiles([csvFile('amount-cross.csv', crossMonth)]);
+  const byMonth = BILL.aggregateByMonth(parsed.records);
+
+  assert.equal(byMonth['2026-09'].agg.total.tokens.output, 100, '9 月输出 token');
+  assert.equal(byMonth['2026-10'].agg.total.tokens.output, 7, '10 月输出 token');
+  assert.equal(byMonth['2026-10'].agg.total.tokens.requests, 3, '10 月请求次数');
+  assert.equal(byMonth['2026-09'].agg.total.tokens.requests, 0);
+});
+
+test('单价缺失的 token 行仍然计数（不能因为没有金额就丢掉 token）', async () => {
+  const noPrice = [
+    'user_id,start_time_iso,end_time_iso,model,api_key_name,api_key,type,price,amount',
+    'u1,2026-09-06T00:00:00+08:00,2026-09-07T00:00:00+08:00,deepseek-v4-flash,k,sk-a,input_cache_miss_tokens,,2000',
+    'u1,2026-09-06T00:00:00+08:00,2026-09-07T00:00:00+08:00,deepseek-v4-flash,k,sk-a,output_tokens,0,300',
+  ].join('\n');
+
+  const parsed = await BILL.parseFiles([csvFile('amount-noprice.csv', noPrice)]);
+  const agg = BILL.aggregate(parsed.records);
+
+  assert.equal(agg.total.tokens.miss, 2000, '没有单价也要统计未命中 token');
+  assert.equal(agg.total.tokens.output, 300, '单价为 0 也要统计输出 token');
+  assert.equal(agg.total.amount, 0, '没有有效单价时金额为 0');
+});
+
+test('未知的 type 值不会被算进任何 token 桶', async () => {
+  const weird = [
+    'user_id,start_time_iso,end_time_iso,model,api_key_name,api_key,type,price,amount',
+    'u1,2026-09-06T00:00:00+08:00,2026-09-07T00:00:00+08:00,deepseek-v4-flash,k,sk-a,something_else,0.5,4',
+  ].join('\n');
+
+  const parsed = await BILL.parseFiles([csvFile('amount-weird.csv', weird)]);
+  const agg = BILL.aggregate(parsed.records);
+
+  assert.deepEqual(agg.total.tokens, BILL.emptyTokens(), '未知指标不应进入任何桶');
+  close(agg.total.amount, 2, '但它的金额仍应照常统计');
+});

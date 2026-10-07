@@ -14,10 +14,27 @@ const DEFAULT_SETTINGS = {
   threshold: 5,
   alertsEnabled: true,
   refreshInterval: 10,
-  widgetMode: 'floating'
+  widgetMode: 'floating',
+  trendRange: '7d'
 };
 
-const STORAGE_KEYS = ['ds_settings', 'ds_last_data', 'ds_last_error', 'ds_api_key', 'ds_bill_imports'];
+const STORAGE_KEYS = [
+  'ds_settings', 'ds_last_data', 'ds_last_error', 'ds_api_key', 'ds_bill_imports',
+  'ds_balance_history'
+];
+
+/** 趋势图的时间档位 */
+const TREND_RANGES = {
+  '24h': { ms: 24 * 60 * 60 * 1000 },
+  '7d': { ms: 7 * 24 * 60 * 60 * 1000 },
+  '30d': { ms: 30 * 24 * 60 * 60 * 1000 }
+};
+
+/** 画布尺寸：与 popup.css 里的 .trend-svg 保持一致（卡片内宽 284px） */
+const TREND_W = 284;
+const TREND_H = 90;
+/** 最多画这么多个点：再多也只是重复占用像素 */
+const TREND_MAX_POINTS = 120;
 
 const el = {
   keyInput: document.getElementById('apiKeyInput'),
@@ -45,6 +62,15 @@ const el = {
   totalQuotaValue: document.getElementById('totalQuotaValue'),
   statusDot: document.getElementById('statusDot'),
   statusText: document.getElementById('statusText'),
+  // 余额趋势
+  trendTabs: document.getElementById('trendTabs'),
+  trendSvg: document.getElementById('trendSvg'),
+  trendMax: document.getElementById('trendMax'),
+  trendMin: document.getElementById('trendMin'),
+  trendEmpty: document.getElementById('trendEmpty'),
+  trendFrom: document.getElementById('trendFrom'),
+  trendTo: document.getElementById('trendTo'),
+  trendHint: document.getElementById('trendHint'),
   // 全平台账单
   billMonthSelect: document.getElementById('billMonthSelect'),
   billAutoBtn: document.getElementById('billAutoBtn'),
@@ -54,6 +80,12 @@ const el = {
   billBody: document.getElementById('billBody'),
   billAmount: document.getElementById('billAmount'),
   billWallet: document.getElementById('billWallet'),
+  billTokens: document.getElementById('billTokens'),
+  billHitRate: document.getElementById('billHitRate'),
+  billHit: document.getElementById('billHit'),
+  billMiss: document.getElementById('billMiss'),
+  billOutput: document.getElementById('billOutput'),
+  billRequests: document.getElementById('billRequests'),
   billKeyList: document.getElementById('billKeyList'),
   billModelList: document.getElementById('billModelList'),
   billUpdated: document.getElementById('billUpdated'),
@@ -68,12 +100,16 @@ let refreshing = false;
 let keyDebounceTimer = null;
 let currentBills = {};       // ds_bill_imports：{ 月份: {agg, source, importedAt, warnings} }
 let currentBillMonth = null; // 当前查看的账单月份
+let currentHistory = [];     // ds_balance_history：[{t, v}] 后台定时采样的余额
+let currentTrendRange = '7d';
+let currentSettings = { ...DEFAULT_SETTINGS };
 
 /* ------------------------------ 初始化 ------------------------------ */
 
 async function init() {
   const stored = await chrome.storage.local.get(STORAGE_KEYS);
   const settings = { ...DEFAULT_SETTINGS, ...(stored.ds_settings || {}) };
+  currentSettings = settings;
 
   el.keyInput.value = stored.ds_api_key || '';
   el.thresholdInput.value = settings.threshold;
@@ -82,8 +118,11 @@ async function init() {
   el.widgetModeSelect.value = settings.widgetMode || 'floating';
 
   currentBills = stored.ds_bill_imports || {};
+  currentHistory = Array.isArray(stored.ds_balance_history) ? stored.ds_balance_history : [];
+  currentTrendRange = TREND_RANGES[settings.trendRange] ? settings.trendRange : '7d';
   initBillMonth();
   renderBill();
+  renderTrend();
   renderFromStorage(stored.ds_last_data, stored.ds_last_error);
   bindEvents();
 
@@ -94,6 +133,12 @@ async function init() {
       chrome.storage.local.get(['ds_last_data', 'ds_last_error']).then((s) => {
         renderFromStorage(s.ds_last_data, s.ds_last_error);
       });
+    }
+    if (changes.ds_balance_history) {
+      currentHistory = Array.isArray(changes.ds_balance_history.newValue)
+        ? changes.ds_balance_history.newValue
+        : [];
+      renderTrend();
     }
     if (changes.ds_bill_imports) {
       currentBills = changes.ds_bill_imports.newValue || {};
@@ -241,6 +286,19 @@ function bindEvents() {
   // 手动刷新余额
   el.refreshBtn.addEventListener('click', doRefresh);
 
+  // 趋势时间档位切换
+  el.trendTabs.addEventListener('click', (e) => {
+    const btn = e.target.closest('.trend-tab');
+    if (!btn || !TREND_RANGES[btn.dataset.range]) return;
+    currentTrendRange = btn.dataset.range;
+    chrome.storage.local.get('ds_settings').then((s) => {
+      chrome.storage.local.set({
+        ds_settings: { ...DEFAULT_SETTINGS, ...(s.ds_settings || {}), trendRange: currentTrendRange }
+      });
+    });
+    renderTrend();
+  });
+
   // 账单：月份切换、文件选择、拖拽导入、自动拉取、清空
   el.billMonthSelect.addEventListener('change', () => {
     currentBillMonth = el.billMonthSelect.value || null;
@@ -272,6 +330,102 @@ function bindEvents() {
   });
   el.billAutoBtn.addEventListener('click', autoFetchBill);
   el.billClearBtn.addEventListener('click', clearBills);
+}
+
+/* ------------------------------ 余额趋势 ------------------------------ */
+
+/**
+ * 画余额随时间的曲线。
+ *
+ * 数据是后台每次成功查询余额时顺手记下的采样点，所以：
+ *   - 它只覆盖「浏览器开着」的时段，跨过没观测的时段画虚线（见 trend.js）；
+ *   - 装好当天没有历史，要养一段时间才有东西看。
+ */
+function renderTrend() {
+  const range = TREND_RANGES[currentTrendRange] || TREND_RANGES['7d'];
+  const now = Date.now();
+
+  // 高亮当前档位
+  Array.from(el.trendTabs.children).forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.range === currentTrendRange);
+  });
+
+  const inRange = DS_TREND.sliceRange(currentHistory, now - range.ms, now);
+  const series = DS_TREND.buildSeries(inRange, {
+    width: TREND_W,
+    height: TREND_H,
+    padX: 2,
+    padY: 12,
+    gapMs: trendGapMs(),
+    maxPoints: TREND_MAX_POINTS
+  });
+
+  if (series.count < 2) {
+    el.trendSvg.innerHTML = '';
+    el.trendMax.textContent = '';
+    el.trendMin.textContent = '';
+    el.trendFrom.textContent = '—';
+    el.trendTo.textContent = '—';
+    el.trendHint.textContent = '';
+    // 区分「还没有任何采样」和「这段窗口内没有采样」——两者的下一步动作不同
+    el.trendEmpty.textContent = currentHistory.length
+      ? '所选时段内没有采样记录'
+      : '趋势数据从今天开始积累';
+    el.trendEmpty.hidden = false;
+    requestAnimationFrame(() => layoutPages());
+    return;
+  }
+
+  el.trendEmpty.hidden = true;
+
+  const parts = [];
+  let hasGap = false;
+  series.paths.forEach((p) => {
+    if (p.dashed) hasGap = true;
+    parts.push(
+      `<path d="${p.d}" fill="none" stroke="#4d6bfe" stroke-width="1.6" ` +
+      `stroke-linejoin="round" stroke-linecap="round"` +
+      (p.dashed ? ' stroke-dasharray="3 3" opacity="0.4"' : '') + '/>'
+    );
+  });
+  series.dots.forEach((d) => {
+    parts.push(`<circle cx="${d.x}" cy="${d.y}" r="2" fill="#4d6bfe"/>`);
+  });
+  if (series.last) {
+    // 末点＝当前余额，单独标出来
+    parts.push(`<circle cx="${series.last.x}" cy="${series.last.y}" r="6" fill="#4d6bfe" opacity="0.16"/>`);
+    parts.push(`<circle cx="${series.last.x}" cy="${series.last.y}" r="2.6" fill="#4d6bfe"/>`);
+  }
+  el.trendSvg.innerHTML = parts.join('');
+
+  // Y 轴不从 0 起，所以必须把上下界标出来，否则纵向变化会被误读成很大
+  el.trendMax.textContent = `¥${formatMoney(series.max)}`;
+  el.trendMin.textContent = series.min === series.max ? '' : `¥${formatMoney(series.min)}`;
+
+  el.trendFrom.textContent = formatTrendTime(inRange[0].t);
+  el.trendTo.textContent = formatTrendTime(inRange[inRange.length - 1].t);
+  el.trendHint.textContent = hasGap ? '虚线＝未观测时段' : '';
+
+  requestAnimationFrame(() => layoutPages());
+}
+
+/**
+ * 判定「这段没在观测」的间隔阈值。
+ * 必须跟着用户设置的刷新间隔走：间隔设成 60 分钟时，若还用固定的 30 分钟，
+ * 整条曲线会段段都是虚线。取 3 倍留出闹钟抖动与偶尔漏一次的余量。
+ */
+function trendGapMs() {
+  const minutes = Number(currentSettings.refreshInterval) || DEFAULT_SETTINGS.refreshInterval;
+  return Math.max(minutes, 1) * 60 * 1000 * 3;
+}
+
+function formatTrendTime(ts) {
+  const d = new Date(ts);
+  const pad = (x) => String(x).padStart(2, '0');
+  // 24 小时档看的是时刻，更长的档看的是日期
+  return currentTrendRange === '24h'
+    ? `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    : `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /* ------------------------ 全平台账单（金额） ------------------------ */
@@ -314,6 +468,7 @@ function renderBill() {
   el.billBody.hidden = false;
   el.billAmount.textContent = formatMoney(t.amount);
   renderWallet(entry.agg.wallet);
+  renderTokens(tokensOf(t));
   renderBreakdown(el.billKeyList, entry.agg.byKey);
   renderBreakdown(el.billModelList, entry.agg.byModel);
 
@@ -350,8 +505,56 @@ function renderWallet(wallet) {
 }
 
 /**
- * 渲染分 Key / 分模型金额明细（按金额降序，最多 8 行）
- * @param {boolean} byKey true=按 Key（金额来自用量明细反推）
+ * 取一个分组里的 token 计数。
+ * 旧版本（1.4.x）导入的账单没有这个字段，此时返回 null，界面按「无 token 数据」处理。
+ */
+function tokensOf(group) {
+  const t = group && group.tokens;
+  if (!t || typeof t !== 'object') return null;
+  return {
+    hit: Number(t.hit) || 0,
+    miss: Number(t.miss) || 0,
+    output: Number(t.output) || 0,
+    requests: Number(t.requests) || 0
+  };
+}
+
+/** 缓存命中率 = 命中 / (命中 + 未命中)，即输入 token 的命中占比 */
+function hitRateOf(tk) {
+  const input = tk.hit + tk.miss;
+  return input > 0 ? (tk.hit / input) * 100 : null;
+}
+
+/**
+ * 渲染 Token 用量总览：缓存命中 / 未命中 / 输出 / 请求次数 + 命中率。
+ * 没有任何 token 数据时整块隐藏（例如只导入了花费明细，或旧版本存的账单）。
+ */
+function renderTokens(tk) {
+  const hasAny = tk && (tk.hit || tk.miss || tk.output || tk.requests);
+  if (!hasAny) {
+    el.billTokens.hidden = true;
+    return;
+  }
+
+  el.billTokens.hidden = false;
+  setTokenStat(el.billHit, tk.hit);
+  setTokenStat(el.billMiss, tk.miss);
+  setTokenStat(el.billOutput, tk.output);
+  setTokenStat(el.billRequests, tk.requests, ' 次');
+
+  const rate = hitRateOf(tk);
+  el.billHitRate.textContent = rate == null ? '命中率 —' : `命中率 ${rate.toFixed(1)}%`;
+}
+
+/** 大数用「万 / 亿」缩写显示，鼠标悬停可看完整数字 */
+function setTokenStat(node, value, unit) {
+  node.textContent = formatTokens(value) + (unit || '');
+  node.title = `${formatCount(value)}${unit || ''}`;
+}
+
+/**
+ * 渲染分 Key / 分模型金额明细（按金额降序，最多 8 行）。
+ * 副标题同时给出调用次数与缓存命中 / 未命中 token。
  */
 function renderBreakdown(container, groups) {
   const names = Object.keys(groups || {});
@@ -365,11 +568,35 @@ function renderBreakdown(container, groups) {
     return `<div class="bill-row">
       <div class="bill-row-left">
         <div class="bill-row-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
-        <div class="bill-row-sub">${g.rows} 条记录</div>
+        <div class="bill-row-sub" title="${escapeHtml(breakdownTitle(g))}">${escapeHtml(breakdownSub(g))}</div>
       </div>
       <div class="bill-row-right">¥${formatMoney(g.amount)}</div>
     </div>`;
   }).join('');
+}
+
+/**
+ * 明细行的副标题：有 token 数据时展示缓存命中 / 未命中。
+ * 弹窗只有 340px 宽，这里只放最短的两个数；调用次数与精确值放进悬停提示。
+ */
+function breakdownSub(g) {
+  const tk = tokensOf(g);
+  if (!tk || (!tk.hit && !tk.miss)) {
+    return tk && tk.requests ? `${formatCount(tk.requests)} 次调用` : `${g.rows} 条记录`;
+  }
+  return `命中 ${formatTokens(tk.hit)} / 未命中 ${formatTokens(tk.miss)}`;
+}
+
+/** 明细行的悬停提示：调用次数 + 全部 token 精确值 */
+function breakdownTitle(g) {
+  const tk = tokensOf(g);
+  if (!tk || (!tk.hit && !tk.miss && !tk.requests)) return `${g.rows} 条记录`;
+  return [
+    `${formatCount(tk.requests)} 次调用`,
+    `缓存命中 ${formatCount(tk.hit)}`,
+    `缓存未命中 ${formatCount(tk.miss)}`,
+    `输出 ${formatCount(tk.output)}`
+  ].join(' · ');
 }
 
 /**
@@ -505,10 +732,15 @@ async function saveSettingsFromForm() {
     threshold,
     alertsEnabled: el.alertToggle.checked,
     refreshInterval: parseInt(el.intervalSelect.value, 10) || DEFAULT_SETTINGS.refreshInterval,
-    widgetMode
+    widgetMode,
+    // 趋势档位不在设置页里，但这里整体重写 ds_settings，必须原样带过去
+    trendRange: prev.trendRange || DEFAULT_SETTINGS.trendRange
   };
 
   await chrome.storage.local.set({ ds_settings: next });
+  currentSettings = next;
+  // 刷新间隔会影响「多长算没观测」，趋势图要跟着重画
+  renderTrend();
 
   // 关闭提醒时清除旧的低余额状态标记，下次重新开启可正常提醒
   if (!next.alertsEnabled && prev.alertsEnabled) {
@@ -605,6 +837,21 @@ function formatMoney(n) {
   const num = Number(n);
   if (!Number.isFinite(num)) return '--.--';
   return num.toFixed(2);
+}
+
+/** 整数 + 千分位（用于 token 数 / 请求次数） */
+function formatCount(n) {
+  const v = Math.round(Number(n) || 0);
+  return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/** Token 数量：过万 / 过亿时缩写，避免在 340px 宽的弹窗里撑破排版 */
+function formatTokens(n) {
+  const v = Number(n) || 0;
+  const abs = Math.abs(v);
+  if (abs >= 1e8) return `${(v / 1e8).toFixed(2)} 亿`;
+  if (abs >= 1e4) return `${(v / 1e4).toFixed(2)} 万`;
+  return formatCount(v);
 }
 
 function escapeHtml(s) {

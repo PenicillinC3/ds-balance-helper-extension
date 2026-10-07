@@ -72,10 +72,36 @@
           </div>
         </section>
 
-        <!-- 2.5 全平台用量卡片（官方导出 CSV / 登录态自动拉取，只统计金额） -->
+        <!-- 2.2 余额趋势（后台定时采样，只要配了 Key 就成立，不需要登录态） -->
+        <section class="settings-card trend-card" id="trendCard">
+          <div class="trend-head">
+            <div class="settings-title" style="margin-bottom:0;">余额趋势</div>
+            <div class="trend-tabs" id="trendTabs">
+              <button class="trend-tab" type="button" data-range="24h">24 小时</button>
+              <button class="trend-tab" type="button" data-range="7d">7 天</button>
+              <button class="trend-tab" type="button" data-range="30d">30 天</button>
+            </div>
+          </div>
+
+          <div class="trend-plot">
+            <svg class="trend-svg" id="trendSvg" viewBox="0 0 284 90" width="284" height="90"
+                 role="img" aria-label="可用余额随时间的变化曲线"></svg>
+            <div class="trend-axis trend-axis-max" id="trendMax"></div>
+            <div class="trend-axis trend-axis-min" id="trendMin"></div>
+            <div class="trend-empty" id="trendEmpty">趋势数据从今天开始积累</div>
+          </div>
+
+          <div class="trend-foot">
+            <span class="trend-time" id="trendFrom">—</span>
+            <span class="trend-hint" id="trendHint"></span>
+            <span class="trend-time" id="trendTo">—</span>
+          </div>
+        </section>
+
+        <!-- 2.5 全平台用量卡片（官方导出 CSV / 登录态自动拉取，金额 + Token） -->
         <section class="settings-card usage-card">
           <div class="usage-head">
-            <div class="settings-title" style="margin-bottom:0;">全平台用量（金额）</div>
+            <div class="settings-title" style="margin-bottom:0;">全平台用量</div>
           </div>
 
           <div class="source-panel" id="billPanel">
@@ -104,6 +130,32 @@
                 <div class="bill-amount-value" id="billAmount">0.00</div>
               </div>
               <div class="bill-wallet" id="billWallet" hidden></div>
+
+              <!-- Token 用量（来自官方用量明细的 type 列） -->
+              <div class="bill-tokens" id="billTokens" hidden>
+                <div class="bill-token-head">
+                  <span class="bill-token-title">Token 用量</span>
+                  <span class="bill-token-rate" id="billHitRate">命中率 —</span>
+                </div>
+                <div class="bill-token-grid">
+                  <div class="token-stat">
+                    <div class="token-label">缓存命中</div>
+                    <div class="token-value" id="billHit">—</div>
+                  </div>
+                  <div class="token-stat">
+                    <div class="token-label">缓存未命中</div>
+                    <div class="token-value" id="billMiss">—</div>
+                  </div>
+                  <div class="token-stat">
+                    <div class="token-label">输出</div>
+                    <div class="token-value" id="billOutput">—</div>
+                  </div>
+                  <div class="token-stat">
+                    <div class="token-label">请求次数</div>
+                    <div class="token-value" id="billRequests">—</div>
+                  </div>
+                </div>
+              </div>
 
               <div class="bill-sub-title">按 API Key</div>
               <div class="bill-breakdown" id="billKeyList"></div>
@@ -211,6 +263,7 @@
 
   </div>
   <script src="bill.js"></script>
+  <script src="trend.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

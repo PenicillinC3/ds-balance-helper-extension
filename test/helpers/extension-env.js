@@ -3,9 +3,10 @@
  * 测试辅助：在 Node vm 里加载扩展脚本，并伪造 chrome API / window。
  * ============================================================
  * 只做"运行环境替身"，不替身被测逻辑本身：
- *   - createBackgroundEnv() 加载真实的 background.js + bill.js
- *   - createInterceptorEnv() 加载真实的 interceptor-main.js
- * 两者都返回可断言的存储 / 消息记录。
+ *   - createBackgroundEnv()     加载真实的 background.js + bill.js
+ *   - createPlatformExportEnv() 加载真实的 bill.js + platform-export.js
+ *   - createWidgetEnv()         加载真实的 widget.js（仅取其中的纯函数）
+ * 各自返回可断言的存储 / 消息 / 调用记录。
  * ============================================================
  */
 
@@ -220,83 +221,23 @@ function createBackgroundEnv(options = {}) {
 }
 
 /**
- * 加载 interceptor-main.js 到 vm 中，并提供一个可控的页面 fetch / XHR。
- * @returns {{sandbox, posted, pageFetch, fireXhrLoad}}
+ * 加载 widget.js 到 vm 中，只取其中的纯函数（不构建 Shadow DOM）。
+ *
+ * widget.js 是内容脚本，顶层会做「仅顶层框架」判断并在有 document 时启动，
+ * 因此这里不提供 document / chrome：脚本走到最后只会把纯函数挂到
+ * globalThis.__dsWidgetTest.api 上。
+ * @returns {{sandbox, api}}
  */
-function createInterceptorEnv() {
-  const posted = [];
-  const impl = { fn: async () => { throw new Error('fetch 未被桩替换'); } };
-
-  function FakeXHR() {
-    this.__listeners = {};
-    this.readyState = 4;
-    this.status = 200;
-    this.responseType = '';
-    this.__text = '';
-    this.__headers = { 'content-type': 'application/json' };
-  }
-  FakeXHR.prototype.open = function () {};
-  FakeXHR.prototype.send = function () {};
-  FakeXHR.prototype.setRequestHeader = function () {};
-  FakeXHR.prototype.addEventListener = function (type, fn) {
-    (this.__listeners[type] = this.__listeners[type] || []).push(fn);
-  };
-  FakeXHR.prototype.getResponseHeader = function (name) {
-    return this.__headers[String(name).toLowerCase()] || null;
-  };
-  Object.defineProperty(FakeXHR.prototype, 'responseText', {
-    get() {
-      // 按 XHR 规范：responseType 不是 '' 或 'text' 时读取会抛 InvalidStateError
-      if (this.responseType && this.responseType !== 'text') {
-        const err = new Error(
-          "Failed to read the 'responseText' property from 'XMLHttpRequest': " +
-          "The value is only accessible if the object's 'responseType' is '' or 'text' " +
-          `(was '${this.responseType}').`
-        );
-        err.name = 'InvalidStateError';
-        throw err;
-      }
-      return this.__text;
-    },
-  });
-  Object.defineProperty(FakeXHR.prototype, 'response', {
-    get() {
-      if (this.responseType === 'json') {
-        try { return JSON.parse(this.__text); } catch (e) { return null; }
-      }
-      return this.__text;
-    },
-  });
-
-  const sandbox = {
-    console,
-    URL,
-    setTimeout,
-    clearTimeout,
-    XMLHttpRequest: FakeXHR,
-    Response: globalThis.Response,
-    Request: globalThis.Request,
-  };
-  sandbox.window = {
-    postMessage: (msg) => posted.push(msg),
-    fetch: (...args) => impl.fn(...args),
-  };
-  sandbox.location = { href: 'https://platform.deepseek.com/' };
-  sandbox.self = sandbox.window;
+function createWidgetEnv() {
+  const sandbox = { console };
+  sandbox.window = sandbox;
+  sandbox.top = sandbox; // window.top === window，通过「仅顶层框架」判断
+  sandbox.__dsWidgetTest = {};
 
   vm.createContext(sandbox);
-  vm.runInContext(readSource('interceptor-main.js'), sandbox, { filename: 'interceptor-main.js' });
+  vm.runInContext(readSource('widget.js'), sandbox, { filename: 'widget.js' });
 
-  /** 替换页面真实 fetch 的实现（必须走间接层，否则会覆盖拦截器本身） */
-  function pageFetch(bodyText, contentType) {
-    impl.fn = async () => new Response(bodyText, {
-      status: 200,
-      headers: { 'content-type': contentType || 'application/json' },
-    });
-    return sandbox.window.fetch;
-  }
-
-  return { sandbox, posted, pageFetch, FakeXHR };
+  return { sandbox, api: sandbox.__dsWidgetTest.api };
 }
 
 /**
@@ -376,6 +317,6 @@ module.exports = {
   readSource,
   createStorage,
   createBackgroundEnv,
-  createInterceptorEnv,
   createPlatformExportEnv,
+  createWidgetEnv,
 };

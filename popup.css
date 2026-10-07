@@ -511,6 +511,110 @@ select.text-input {
   color: #c0392b;
 }
 
+/* ---------------- 余额趋势 ---------------- */
+
+.trend-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+/* 时间档位：三个小标签，选中态用品牌色 */
+.trend-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border-radius: 7px;
+  padding: 2px;
+}
+
+.trend-tab {
+  border: none;
+  background: transparent;
+  color: var(--text-sub);
+  font-size: 10.5px;
+  font-family: inherit;
+  padding: 3px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.trend-tab:hover {
+  color: var(--brand);
+}
+
+.trend-tab.active {
+  background: #fff;
+  color: var(--brand);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(31, 35, 41, 0.1);
+}
+
+.trend-plot {
+  position: relative;
+  height: 90px;
+}
+
+.trend-svg {
+  display: block;
+  width: 100%;
+  height: 90px;
+  overflow: visible;
+}
+
+/* Y 轴的最大 / 最小值：Y 轴不从 0 起，必须标出来才不会误导 */
+.trend-axis {
+  position: absolute;
+  left: 0;
+  font-size: 9.5px;
+  color: var(--text-light);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  line-height: 1;
+}
+
+.trend-axis-max { top: 0; }
+.trend-axis-min { bottom: 0; }
+
+.trend-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-light);
+  text-align: center;
+  padding: 0 16px;
+}
+
+.trend-empty[hidden] {
+  display: none;
+}
+
+.trend-foot {
+  margin-top: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-light);
+  font-variant-numeric: tabular-nums;
+}
+
+.trend-hint {
+  flex: 1;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ---------------- 底部状态栏 ---------------- */
 
 .statusbar {
@@ -741,6 +845,68 @@ select.text-input {
   font-variant-numeric: tabular-nums;
 }
 
+/* Token 用量 */
+.bill-tokens {
+  margin-top: 12px;
+}
+
+.bill-tokens[hidden] {
+  display: none;
+}
+
+.bill-token-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.bill-token-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-sub);
+}
+
+.bill-token-rate {
+  font-size: 10.5px;
+  color: var(--brand);
+  background: var(--brand-light);
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bill-token-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+
+.token-stat {
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 6px 9px;
+  min-width: 0;
+}
+
+.token-label {
+  font-size: 10px;
+  color: var(--text-light);
+}
+
+.token-value {
+  margin-top: 2px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: help;
+}
+
 /* 明细标题 */
 .bill-sub-title {
   margin-top: 12px;
@@ -784,6 +950,9 @@ select.text-input {
   margin-top: 1px;
   font-size: 10px;
   color: var(--text-light);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bill-row-right {

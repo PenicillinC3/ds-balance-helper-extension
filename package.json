@@ -1,6 +1,6 @@
 {
   "name": "deepseek-balance-helper",
-  "version": "1.4.1",
+  "version": "1.6.0",
   "private": true,
   "description": "DeepSeek 余额助手（Chrome / Edge 扩展）—— 纯函数逻辑的 Node 单测",
   "scripts": {

@@ -7,7 +7,7 @@
  *   - pinned ：固定在页面右上角常驻
  *   - off    ：不显示（设置面板中可切换回来）
  * 数据来自 chrome.storage.local（由后台 service worker 定时刷新），
- * 展示可用余额、本地累计消耗与低余额预警提示。
+ * 展示可用余额、本地累计消耗、最近一个月的全平台 Token 用量与低余额预警提示。
  *
  * 样式与事件全部封装在 Shadow DOM 内，不污染宿主页，也不受宿主页样式影响。
  * ============================================================
@@ -21,7 +21,9 @@
   if (window.__DS_WIDGET_BOOTED__) return;
   window.__DS_WIDGET_BOOTED__ = true;
 
-  const STORAGE_KEYS = ['ds_settings', 'ds_last_data', 'ds_last_error', 'ds_api_key', 'ds_widget_pos'];
+  const STORAGE_KEYS = [
+    'ds_settings', 'ds_last_data', 'ds_last_error', 'ds_api_key', 'ds_widget_pos', 'ds_bill_imports'
+  ];
   const DEFAULT_SETTINGS = { threshold: 5, alertsEnabled: true, refreshInterval: 10, widgetMode: 'floating' };
 
   const state = {
@@ -29,7 +31,8 @@
     data: null,
     error: null,
     key: '',
-    pos: null
+    pos: null,
+    bills: null
   };
 
   /* ----------------------------- 纯函数（便于测试） ----------------------------- */
@@ -37,6 +40,61 @@
   function formatMoney(n) {
     const num = Number(n);
     return Number.isFinite(num) ? num.toFixed(2) : '--.--';
+  }
+
+  /** 整数 + 千分位 */
+  function formatCount(n) {
+    return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  /** Token 数量：过万 / 过亿时缩写，浮窗只有 248px 宽 */
+  function formatTokens(n) {
+    const v = Number(n) || 0;
+    const abs = Math.abs(v);
+    if (abs >= 1e8) return `${(v / 1e8).toFixed(2)} 亿`;
+    if (abs >= 1e4) return `${(v / 1e4).toFixed(2)} 万`;
+    return formatCount(v);
+  }
+
+  /**
+   * 取账单里最近一个月的 Token 用量。
+   * 浮窗空间有限，只展示最新月份；没有账单数据时返回 null（不显示该行）。
+   */
+  function latestBillTokens(bills) {
+    if (!bills || typeof bills !== 'object') return null;
+    const months = Object.keys(bills).filter((m) => /^\d{4}-\d{2}$/.test(m)).sort();
+    if (!months.length) return null;
+
+    const month = months[months.length - 1];
+    const entry = bills[month];
+    const t = entry && entry.agg && entry.agg.total && entry.agg.total.tokens;
+    if (!t) return null;
+
+    const tk = {
+      month,
+      hit: Number(t.hit) || 0,
+      miss: Number(t.miss) || 0,
+      output: Number(t.output) || 0,
+      requests: Number(t.requests) || 0
+    };
+    if (!tk.hit && !tk.miss && !tk.output && !tk.requests) return null;
+    return tk;
+  }
+
+  /** 浮窗里的 Token 一行文案 */
+  function tokenText(tk) {
+    return `${Number(tk.month.slice(5, 7))}月 Token 命中 ${formatTokens(tk.hit)} / 未命中 ${formatTokens(tk.miss)}`;
+  }
+
+  /** 悬停提示：给出精确数字 */
+  function tokenTitle(tk) {
+    return [
+      `${tk.month} Token 用量`,
+      `缓存命中：${formatCount(tk.hit)}`,
+      `缓存未命中：${formatCount(tk.miss)}`,
+      `输出：${formatCount(tk.output)}`,
+      `请求次数：${formatCount(tk.requests)} 次`
+    ].join('\n');
   }
 
   function formatTime(ts) {
@@ -148,6 +206,12 @@
     :host(.alert) .ds-balance { color: #f54a45; }
 
     .ds-sub { font-size: 11px; color: #6b7280; margin-top: 2px; }
+    .ds-tokens {
+      margin-top: 6px; padding-top: 6px; border-top: 1px dashed #eef0f6;
+      font-size: 10.5px; color: #6b7280; line-height: 1.5;
+      font-variant-numeric: tabular-nums; cursor: help;
+    }
+    .ds-tokens[hidden] { display: none; }
 
     .ds-foot {
       margin-top: 8px; padding-top: 7px; border-top: 1px solid #f0f1f5;
@@ -187,6 +251,7 @@
           <div class="ds-balance-label">可用余额（元）</div>
           <div class="ds-balance"><span class="cur">¥</span><span id="ds-balance">--.--</span></div>
           <div class="ds-sub" id="ds-sub">已消耗 ¥0.00（本地统计）</div>
+          <div class="ds-tokens" id="ds-tokens" hidden></div>
         </div>
         <div class="ds-error" id="ds-error" hidden></div>
         <div class="ds-foot">
@@ -212,6 +277,7 @@
     state.error = stored.ds_last_error || null;
     state.key = stored.ds_api_key || '';
     state.pos = stored.ds_widget_pos || null;
+    state.bills = stored.ds_bill_imports || null;
   }
 
   /* ----------------------------- 模式与位置 ----------------------------- */
@@ -316,6 +382,14 @@
       ui.alert.textContent = `余额不足：可用 ¥${formatMoney(state.data.available)}，已低于预警阈值 ¥${Number(state.settings.threshold).toFixed(2)}，请及时充值`;
     }
 
+    // 最近一个月的全平台 Token 用量（来自官方账单，没有账单时不显示）
+    const tk = latestBillTokens(state.bills);
+    ui.tokens.hidden = !tk;
+    if (tk) {
+      ui.tokens.textContent = tokenText(tk);
+      ui.tokens.title = tokenTitle(tk);
+    }
+
     // 错误信息（不覆盖上次成功数据）
     if (state.error && state.error.message) {
       ui.error.hidden = false;
@@ -386,6 +460,7 @@
       main: shadow.getElementById('ds-main'),
       balance: shadow.getElementById('ds-balance'),
       sub: shadow.getElementById('ds-sub'),
+      tokens: shadow.getElementById('ds-tokens'),
       alert: shadow.getElementById('ds-alert'),
       error: shadow.getElementById('ds-error'),
       dot: shadow.getElementById('ds-dot'),
@@ -413,6 +488,7 @@
     if (changes.ds_last_error) state.error = changes.ds_last_error.newValue || null;
     if (changes.ds_api_key) state.key = changes.ds_api_key.newValue || '';
     if (changes.ds_widget_pos) state.pos = changes.ds_widget_pos.newValue || null;
+    if (changes.ds_bill_imports) state.bills = changes.ds_bill_imports.newValue || null;
 
     if (changes.ds_settings) applyMode();
     render();
@@ -427,7 +503,11 @@
   }
 
   // 测试钩子：Node vm 中 document 不存在时仅导出纯函数
-  const pureApi = { formatMoney, formatTime, clamp, shouldAlert, DEFAULT_SETTINGS };
+  const pureApi = {
+    formatMoney, formatTime, formatCount, formatTokens,
+    latestBillTokens, tokenText, tokenTitle,
+    clamp, shouldAlert, DEFAULT_SETTINGS
+  };
   if (typeof globalThis.__dsWidgetTest === 'object' && globalThis.__dsWidgetTest !== null) {
     globalThis.__dsWidgetTest.api = pureApi;
   }

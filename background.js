@@ -18,6 +18,8 @@
 
 // 全平台账单解析（官方导出 CSV 归一化与聚合），与 popup、平台页共用同一套纯逻辑
 importScripts('bill.js');
+// 余额趋势的采样历史工具（追加、保留策略），与 popup 共用
+importScripts('trend.js');
 
 const API_URL = 'https://api.deepseek.com/user/balance';
 const ALARM_NAME = 'ds-balance-refresh';
@@ -203,13 +205,17 @@ async function refreshAndStore(opts = {}) {
   // 读-改-写必须排队：并发刷新（定时任务 + 手动刷新 + 充值）时，
   // 后写的结果会覆盖前一次已记下的下降值，导致消耗少记。
   return serializeWrite(async () => {
-    const { ds_prev_balance: prev, ds_consumed: consumedSoFar } =
-      await getLocal(['ds_prev_balance', 'ds_consumed']);
+    const { ds_prev_balance: prev, ds_consumed: consumedSoFar, ds_balance_history: history } =
+      await getLocal(['ds_prev_balance', 'ds_consumed', 'ds_balance_history']);
     let consumed = Number(consumedSoFar) || 0;
     if (typeof prev === 'number' && d.available < prev) {
       consumed += prev - d.available;
     }
     consumed = Math.round(consumed * 10000) / 10000; // 保留 4 位小数，避免浮点误差
+
+    // 余额趋势采样：搭这次查询的顺风车，不额外发请求。
+    // 只在浏览器开着、闹钟能触发的时候才有点，关着的那段曲线是断的。
+    const nextHistory = DS_TREND.appendSample(history, { t: fetchedAt, v: d.available });
 
     // 若官方未来返回总额度字段，可在此扩展（totalQuota）
     const totalQuota =
@@ -230,6 +236,7 @@ async function refreshAndStore(opts = {}) {
       ds_last_data: data,
       ds_prev_balance: d.available,
       ds_consumed: consumed,
+      ds_balance_history: nextHistory,
       ds_last_error: null // 查询成功，清除历史错误
     });
 

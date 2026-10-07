@@ -43,6 +43,42 @@ test('余额刷新成功后写入快照并清除历史错误', { timeout: 5000 }
   assert.equal(env.storage.store.ds_last_error, undefined, '查询成功应清除历史错误');
 });
 
+/* ---------------------- 余额趋势采样 ---------------------- */
+
+test('余额刷新成功后追加一条趋势采样', { timeout: 5000 }, async () => {
+  const env = createBackgroundEnv({ initial: { ds_api_key: 'sk-test' } });
+  env.balanceQueue.push({ available: 42.5 });
+
+  await env.sandbox.refreshAndStore();
+
+  const history = env.storage.store.ds_balance_history;
+  assert.equal(history.length, 1, '一次成功刷新对应一个采样点');
+  assert.equal(history[0].v, 42.5);
+  assert.ok(history[0].t > 0, '采样要带上时间戳');
+});
+
+test('趋势采样沿用已有历史，不会把它冲掉', { timeout: 5000 }, async () => {
+  const older = { t: Date.now() - 10 * 60 * 1000, v: 100 };
+  const env = createBackgroundEnv({
+    initial: { ds_api_key: 'sk-test', ds_balance_history: [older] },
+  });
+  env.balanceQueue.push({ available: 90 });
+
+  await env.sandbox.refreshAndStore();
+
+  const history = env.storage.store.ds_balance_history;
+  assert.deepEqual(history.map((s) => s.v), [100, 90]);
+});
+
+test('余额刷新失败时不追加趋势采样', { timeout: 5000 }, async () => {
+  const env = createBackgroundEnv({ initial: { ds_api_key: 'sk-test' } });
+  env.balanceQueue.push({ __networkError: true });
+
+  await env.sandbox.refreshAndStore();
+
+  assert.equal(env.storage.store.ds_balance_history, undefined, '查询失败没有值可记');
+});
+
 test('余额刷新失败时不覆盖上一次成功数据', { timeout: 5000 }, async () => {
   const env = createBackgroundEnv({
     initial: {

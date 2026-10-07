@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * bill.js - 全平台账单解析与聚合（只关心金额）
+ * bill.js - 全平台账单解析与聚合（金额 + Token 用量）
  * ============================================================
  * 数据来源：DeepSeek 开放平台「用量信息」页按月导出的压缩包，
  * 内含两个 CSV（表头为官方真实格式）：
@@ -20,6 +20,12 @@
  *   - 按 API Key 金额 —— cost 文件没有 Key 列，用用量明细的 price×amount 反推
  *     （已验证与官方总金额一致）；
  *   - 只有用量明细时，总金额也用反推值兜底。
+ *
+ * Token 口径：
+ *   - 缓存命中 / 未命中 / 输出 / 请求次数全部来自用量明细的 type 列，
+ *     与金额用哪个文件无关（cost 文件里没有 token 信息）；
+ *   - 同一个分组的 tokens 与 amount 互不影响：一行既有 token 又有金额时，
+ *     金额进 amount、数量进 tokens，不会被重复计算。
  *
  * 全部为纯函数，无 DOM 依赖，便于 Node 单测。
  * ============================================================
@@ -182,11 +188,32 @@
     return 'unknown';
   }
 
+  /* ====================== 用量指标（type 列） ====================== */
+
+  /**
+   * 官方用量明细的 type 值 → 内部指标名。
+   * 匹配前统一去掉下划线 / 连字符 / 空格并转小写，
+   * 这样 `input_cache_hit_tokens`、`input-cache-hit-tokens` 等写法都能识别。
+   */
+  var TOKEN_METRICS = {
+    outputtokens: 'output',
+    inputcachehittokens: 'hit',
+    inputcachemisstokens: 'miss',
+    requestcount: 'requests'
+  };
+
+  /** @returns {'hit'|'miss'|'output'|'requests'|''} 未知指标返回空串 */
+  function metricOf(type) {
+    var key = String(type == null ? '' : type).toLowerCase().replace(/[^a-z]/g, '');
+    return TOKEN_METRICS[key] || '';
+  }
+
   /* ============================ 行归一化 ============================ */
 
   /**
    * 将 CSV 行归一化为统一记录：
-   * { time, model, key, amount, walletType, src }
+   * { time, model, key, amount, walletType, src, metric, count }
+   * metric/count 只在用量明细的已知指标行上有值（token 数或请求次数）。
    * @param {Array<Object>} rows parseCSV 的结果
    * @param {string} kind 'usage' | 'cost' | 'unknown'
    * @returns {Array<Object>}
@@ -215,24 +242,27 @@
           key: '', // 花费明细没有 Key 列
           amount: cost,
           walletType: String(get(row, 'wallet') || '').trim(),
-          src: 'cost'
+          src: 'cost',
+          metric: '',
+          count: 0
         });
         continue;
       }
 
-      // 用量明细：request_count 行记录的是次数，不是钱
-      var type = String(get(row, 'type') || '').trim();
-      if (/request[_\s-]?count/i.test(type)) continue;
-
+      // 用量明细：一行一个指标。token 行与 request_count 行也可能带金额
+      // （request_count 的 price 为空，金额自然为 0），两者互不冲突。
+      var metric = metricOf(get(row, 'type'));
       var money = num(get(row, 'price')) * num(get(row, 'amount'));
-      if (!money) continue;
+      if (!money && !metric) continue; // 既不是钱、也不是已知指标的行没有意义
       records.push({
         time: time,
         model: model,
         key: String(get(row, 'keyName') || get(row, 'keyRaw') || '').trim(),
         amount: money,
         walletType: '',
-        src: 'usage'
+        src: 'usage',
+        metric: metric,
+        count: metric ? num(get(row, 'amount')) : 0
       });
     }
     return records;
@@ -240,14 +270,29 @@
 
   /* ============================ 聚合 ============================ */
 
-  function emptyGroup() {
-    return { amount: 0, rows: 0 };
+  /** token / 请求次数的计数桶 */
+  function emptyTokens() {
+    return { hit: 0, miss: 0, output: 0, requests: 0 };
   }
 
-  /** 原样累加，不做中间舍入（见 roundMoney 的说明） */
+  function emptyGroup() {
+    return { amount: 0, rows: 0, tokens: emptyTokens() };
+  }
+
+  /**
+   * 金额：原样累加，不做中间舍入（见 roundMoney 的说明）。
+   * 0 金额的行（request_count、无单价的行）不产生账单意义，不计入。
+   */
   function addToGroup(g, rec) {
-    g.amount += rec.amount || 0;
+    if (!rec.amount) return;
+    g.amount += rec.amount;
     g.rows += 1;
+  }
+
+  /** token / 请求次数：只有用量明细的已知指标行才有 */
+  function addTokens(bucket, rec) {
+    if (!rec.metric) return;
+    bucket[rec.metric] += rec.count || 0;
   }
 
   /** 累加结束后统一收敛小数误差 */
@@ -262,9 +307,10 @@
   }
 
   /**
-   * 聚合金额：
-   *   total / byModel / wallet —— 优先用官方 cost 明细；
-   *   byKey —— 只有用量明细带 Key，故始终从用量明细汇总。
+   * 聚合金额与 token：
+   *   total / byModel / wallet —— 金额优先用官方 cost 明细；
+   *   byKey —— 只有用量明细带 Key，故始终从用量明细汇总；
+   *   tokens —— 与金额口径无关，一律来自用量明细（cost 文件没有 token 信息）。
    * @param {Array<Object>} records normalizeRows 的结果
    */
   function aggregate(records) {
@@ -284,22 +330,30 @@
     var byKey = {};
     var wallet = {};
 
+    function modelGroup(name) {
+      var key = name || '未标注模型';
+      if (!byModel[key]) byModel[key] = emptyGroup();
+      return byModel[key];
+    }
+
     moneyRows.forEach(function (rec) {
       addToGroup(total, rec);
-      var modelName = rec.model || '未标注模型';
-      if (!byModel[modelName]) byModel[modelName] = emptyGroup();
-      addToGroup(byModel[modelName], rec);
+      addToGroup(modelGroup(rec.model), rec);
+    });
+
+    usageRows.forEach(function (rec) {
+      addTokens(total.tokens, rec);
+      addTokens(modelGroup(rec.model).tokens, rec);
+
+      var keyName = rec.key || '未标注 Key';
+      if (!byKey[keyName]) byKey[keyName] = emptyGroup();
+      addToGroup(byKey[keyName], rec);
+      addTokens(byKey[keyName].tokens, rec);
     });
 
     costRows.forEach(function (rec) {
       var w = rec.walletType || '未标注';
       wallet[w] = (wallet[w] || 0) + (rec.amount || 0);
-    });
-
-    usageRows.forEach(function (rec) {
-      var keyName = rec.key || '未标注 Key';
-      if (!byKey[keyName]) byKey[keyName] = emptyGroup();
-      addToGroup(byKey[keyName], rec);
     });
 
     finalizeGroup(total);
@@ -584,6 +638,7 @@
     parseFiles: parseFiles,
     parseTexts: parseTexts,
     emptyGroup: emptyGroup,
+    emptyTokens: emptyTokens,
     usageExportRange: usageExportRange,
     extractUserToken: extractUserToken
   };
